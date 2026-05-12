@@ -157,12 +157,21 @@ def _finalize(state, host):
     run_update_raw = host.data.get('run_update', os.getenv('RUN_UPDATE', False))
     run_update = str(run_update_raw).lower() in ['true', 'yes', '1', 'y']
     
+    exclude_pro_raw = host.data.get('exclude_pro', False)
+    exclude_pro = str(exclude_pro_raw).lower() in ['true', 'yes', '1', 'y']
+    
+    def needs_pro(plan):
+        return any(p.get('operation') in ['attach', 'enable'] for p in plan)
+    
     if run_update:
         # Only execute for those still affected and having a plan
-        patchable_cves = [
-            c.get('title') for c in cve_results 
-            if c.get('current_status') == 'still-affected' and c.get('plan')
-        ]
+        patchable_cves = []
+        for cve in cve_results:
+            if cve.get('current_status') == 'still-affected' and cve.get('plan'):
+                if exclude_pro and needs_pro(cve.get('plan', [])):
+                    logger.info(f"Skipping {cve.get('title')} as it requires Ubuntu Pro and exclude_pro is set.")
+                    continue
+                patchable_cves.append(cve.get('title'))
         
         if patchable_cves:
             logger.info(f"Found {len(patchable_cves)} patchable CVEs. Preparing execution...")

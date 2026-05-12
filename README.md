@@ -26,6 +26,7 @@ uv run pyinfra inventories/inventory.py deploys/deploy_check_cve.py --data no_s1
 | :--- | :--- | :--- |
 | `no_s1` | `true` | SentinelOne APIを使用せず、実機スキャンを実行する |
 | `only_critical` | `true` | 重要度が "Critical" のものだけに絞り込む (デフォルトは High以上) |
+| `exclude_pro` | `true` | Ubuntu Pro登録やサービス有効化が必要な修正を除外する |
 | `run_update` | `true` | 調査だけでなく、実際にパッチの適用（execute）まで行う |
 
 ### 使用例：重要度Criticalのみを調査してアップデートまで実行
