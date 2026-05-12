@@ -3,239 +3,197 @@ import json
 import re
 import csv
 import requests
-import subprocess
 from datetime import datetime
-from pyinfra.operations import apt, python, server
+from pyinfra.operations import python, server
 from pyinfra import logger
-from pyinfra.api.exceptions import OperationError
 
 def _get_cves(state, host):
-    hostname_res = host.run_shell_command("hostname")
-    target_hostname = hostname_res[1].stdout.strip()
+    # Determine source (S1 or local scan)
+    no_s1_raw = host.data.get('no_s1', os.getenv('NO_S1', False))
+    no_s1 = str(no_s1_raw).lower() in ['true', 'yes', '1', 'y']
     
-    token_path = "files/check_cve/token"
-    s1_token = ""
-    if os.path.exists(token_path):
-        with open(token_path, "r") as f:
-            s1_token = f.read().strip()
-            
-    target_severity = host.data.get('target_severity', 'critical').lower()
-    if target_severity == 'high':
-        s1_api_severity = "HIGH"
-    elif target_severity == 'high_or_above':
-        s1_api_severity = "CRITICAL,HIGH"
-    else:
-        s1_api_severity = "CRITICAL"
-
     s1_cve_list = []
-    
-    if s1_token:
-        url = f"https://apse1-globalsoc.sentinelone.net/web/api/v2.1/application-management/risks?endpointName__contains={target_hostname}&severities={s1_api_severity}&limit=1000"
-        headers = {"Authorization": f"ApiToken {s1_token}"}
-        try:
-            resp = requests.get(url, headers=headers)
-            if resp.status_code == 200:
-                data = resp.json().get("data", [])
-                for item in data:
-                    cve_id = item.get("cveId")
-                    if cve_id and cve_id not in s1_cve_list:
-                        s1_cve_list.append(cve_id)
-        except Exception as e:
-            logger.warning(f"Failed to fetch from S1: {e}")
+    only_critical_raw = host.data.get('only_critical', False)
+    only_critical = str(only_critical_raw).lower() in ['true', 'yes', '1', 'y']
 
-    if not s1_cve_list:
-        logger.info("No CVEs from S1, running pro cves locally.")
-        host.run_shell_command("apt-get update && apt-get install -y ubuntu-pro-client", _sudo=True)
-        res = host.run_shell_command("pro cves", _sudo=True)
-        
-        logger.info(f"pro cves status: {res[0]}")
-        logger.info(f"pro cves stderr: {getattr(res[1], 'stderr', 'None')}")
+    if no_s1:
+        logger.info("Mode: Local scan (--no-s1). Fetching CVEs from pro cves.")
+        # Local scan requires sudo and English locale
+        host.run_shell_command("apt-get update && apt-get install -y ubuntu-pro-client", _sudo=True, _sudo_password=host.data.get('sudo_password'), _env={"LC_ALL": "C"})
+        res = host.run_shell_command("pro cves", _sudo=True, _sudo_password=host.data.get('sudo_password'), _env={"LC_ALL": "C"})
         
         if res[1].stdout:
-            # DEBUG: dump the raw stdout to a file to inspect it
-            with open("output/check_cve/debug_pro_cves.txt", "w") as dbg:
-                dbg.write(res[1].stdout)
-                
             clean_stdout = re.sub(r'\x1b\[[0-9;]*m', '', res[1].stdout)
-            matches = re.findall(r'(CVE-\d{4}-\d+)\s+\S+\s+(?:high|critical)', clean_stdout, re.IGNORECASE)
-            s1_cve_list = list(set(matches))
-            
-            # DEBUG: dump the cleaned stdout as well
-            with open("output/check_cve/debug_pro_cves_clean.txt", "w") as dbg:
-                dbg.write(clean_stdout)
-
-    os.makedirs("output/check_cve", exist_ok=True)
-    list_path = f"output/check_cve/list_{host.name}.csv"
-    with open(list_path, "w") as f:
-        f.write("CVE ID\n")
-        for cve in s1_cve_list:
-            f.write(f"{cve}\n")
-            
-    host.data.cve_list_path = list_path
-    host.data.cve_list = s1_cve_list
-
-
-def _check_cves(state, host):
-    host.run_shell_command("apt-get update", _sudo=True)
-    cve_list = host.data.get('cve_list', [])
-    csv_date = datetime.now().strftime('%Y%m%d')
-    host.data.csv_date = csv_date
-    
-    parsed_cves = []
-    api_results_dict = {}
-
-    for cve in cve_list:
-        res = host.run_shell_command(f"pro cve {cve}", _sudo=True)
-        stdout = res[1].stdout if res[1].stdout else ""
-        
-        priority_match = re.search(r'(?i)priority:[\s]*([a-z]+)', re.sub(r'\x1b\[[0-9;]*m', '', stdout))
-        priority = priority_match.group(1) if priority_match else 'unknown'
-        has_packages = bool(re.search(r'(?m)^affected_packages:', stdout))
-        
-        parsed_cves.append({
-            'id': cve,
-            'priority': priority,
-            'has_packages': has_packages
-        })
-        
-    target_api_cves = [c['id'] for c in parsed_cves if c['has_packages']]
-    for cve in target_api_cves:
-        res = host.run_shell_command(f"pro api u.pro.security.fix.cve.plan.v1 --data '{{\"cves\":[\"{cve}\"]}}'", _sudo=True)
-        if res[1].stdout and res[1].stdout.strip().startswith('{'):
-            try:
-                data = json.loads(res[1].stdout)
-                cves_data = data.get('data', {}).get('attributes', {}).get('cves_data', {}).get('cves', [])
-                if cves_data:
-                    api_results_dict[cve] = cves_data[0]
-            except Exception:
-                pass
-
-    check_csv_path = f"output/check_cve/csv-check_{host.name}_{csv_date}.csv"
-    with open(check_csv_path, "w") as f:
-        writer = csv.writer(f)
-        writer.writerow(["CVE ID", "priority", "affected_package", "current_status", "expected_status", "plan", "check"])
-        for cve in parsed_cves:
-            cve_id = cve['id']
-            if cve_id in api_results_dict:
-                api = api_results_dict[cve_id]
-                pkgs = api.get('affected_packages', [])
-                status = api.get('current_status', 'N/A')
-                expected = api.get('expected_status', 'N/A')
-                plan_raw = api.get('plan', [])
-                plan_bool = 'true' if len(plan_raw) > 0 else 'false'
-                check_val = 'NEED_CHECK_FIX'
-                
-                if len(pkgs) == 0 or status == 'not-affected':
-                    check_val = 'NOT_AFFECTED'
-                elif plan_bool == 'false':
-                    check_val = 'UNPATCHABLE'
-                    
-                if pkgs:
-                    for pkg in pkgs:
-                        writer.writerow([cve_id, cve['priority'], pkg, status, expected, plan_bool, check_val])
-                else:
-                    writer.writerow([cve_id, cve['priority'], 'none', status, expected, plan_bool, check_val])
+            if only_critical:
+                regex = r'(CVE-\d{4}-\d+)\s+\S+\s+critical'
+                logger.info("Severity filter: CRITICAL only")
             else:
-                writer.writerow([cve_id, cve['priority'], 'none', 'N/A', 'N/A', 'false', 'NOT_AFFECTED'])
-                
-    host.data.check_csv_path = check_csv_path
-
-
-def _fix_info(state, host):
-    check_csv_path = host.data.get('check_csv_path')
-    csv_date = host.data.get('csv_date', datetime.now().strftime('%Y%m%d'))
-    
-    target_cves = set()
-    if os.path.exists(check_csv_path):
-        with open(check_csv_path, "r") as f:
-            reader = csv.reader(f)
-            for row in reader:
-                if 'NEED_CHECK_FIX' in row:
-                    target_cves.add(row[0].strip())
-    
-    target_cves = list(target_cves)
-    pro_fix_results = []
-    
-    for cve in target_cves:
-        res = host.run_shell_command(f"pro fix --dry-run {cve}", _sudo=True)
-        pro_fix_results.append({
-            'item': cve,
-            'stdout': res[1].stdout if res[1].stdout else ""
-        })
-        
-    fix_csv_path = f"output/check_cve/fix-check_{host.name}_{csv_date}.csv"
-    input_json = json.dumps({"results": pro_fix_results})
-    
-    parse_script = "files/check_cve/parse_fix.py"
-    if os.path.exists(parse_script):
-        with open(fix_csv_path, "w") as out_f:
-            p = subprocess.Popen(["python3", parse_script], stdin=subprocess.PIPE, stdout=out_f, stderr=subprocess.PIPE, text=True)
-            p.communicate(input=input_json)
-    else:
-        logger.warning(f"Parse script not found: {parse_script}")
+                regex = r'(CVE-\d{4}-\d+)\s+\S+\s+(?:high|critical)'
+                logger.info("Severity filter: HIGH or above (default)")
             
-    host.data.fix_csv_path = fix_csv_path
-
-
-def _update_and_summary(state, host):
-    fix_csv_path = host.data.get('fix_csv_path')
-    check_csv_path = host.data.get('check_csv_path')
-    csv_date = host.data.get('csv_date', datetime.now().strftime('%Y%m%d'))
-    
-    plan_csv_path = f"output/check_cve/update-plan_{host.name}_{csv_date}.csv"
-    summary_csv_path = f"output/check_cve/summary_{host.name}_{csv_date}.csv"
-    
-    # Run make_plan.py
-    if os.path.exists("files/check_cve/make_plan.py"):
-        subprocess.run(["python3", "files/check_cve/make_plan.py", fix_csv_path, plan_csv_path])
+            matches = re.findall(regex, clean_stdout, re.IGNORECASE)
+            s1_cve_list = list(set(matches))
     else:
-        logger.warning("make_plan.py not found.")
+        logger.info("Mode: SentinelOne API. Fetching CVEs from S1.")
+        hostname_res = host.run_shell_command("hostname", _env={"LC_ALL": "C"})
+        target_hostname = hostname_res[1].stdout.strip()
         
-    # Execute update if run_update is set
+        token_path = "files/check_cve/token"
+        s1_token = ""
+        if os.path.exists(token_path):
+            with open(token_path, "r") as f:
+                s1_token = f.read().strip()
+                
+        if only_critical:
+            s1_api_severity = "CRITICAL"
+            logger.info("Severity filter: CRITICAL only")
+        else:
+            s1_api_severity = "CRITICAL,HIGH"
+            logger.info("Severity filter: HIGH or above (default)")
+
+        if s1_token:
+            url = f"https://apse1-globalsoc.sentinelone.net/web/api/v2.1/application-management/risks?endpointName__contains={target_hostname}&severities={s1_api_severity}&limit=1000"
+            headers = {"Authorization": f"ApiToken {s1_token}"}
+            try:
+                resp = requests.get(url, headers=headers)
+                if resp.status_code == 200:
+                    data = resp.json().get("data", [])
+                    for item in data:
+                        cve_id = item.get("cveId")
+                        if cve_id and cve_id not in s1_cve_list:
+                            s1_cve_list.append(cve_id)
+                else:
+                    logger.warning(f"S1 API returned status {resp.status_code}")
+            except Exception as e:
+                logger.warning(f"Failed to fetch from S1: {e}")
+        else:
+            logger.warning("No S1 token found at files/check_cve/token")
+
+    if not s1_cve_list:
+        logger.info("No CVEs found. Stopping further processing for this host.")
+        host.data.skip_cve_tasks = True
+        return
+
+    host.data.cve_list = sorted(s1_cve_list)
+    host.data.skip_cve_tasks = False
+
+
+def _scan_and_plan(state, host):
+    if host.data.get('skip_cve_tasks'):
+        return
+
+    cve_list = host.data.get('cve_list', [])
+    if not cve_list:
+        return
+
+    logger.info(f"Scanning and planning for {len(cve_list)} CVEs using pro api...")
+    payload = json.dumps({"cves": cve_list})
+    
+    # Use pro api to get a structured fix plan in JSON
+    res = host.run_shell_command(
+        f"pro api u.pro.security.fix.cve.plan.v1 --data '{payload}'",
+        _sudo=True,
+        _sudo_password=host.data.get('sudo_password'),
+        _env={"LC_ALL": "C"}
+    )
+    
+    if res[0] and res[1].stdout:
+        try:
+            data = json.loads(res[1].stdout)
+            # Store the raw CVE results for the finalize step
+            host.data.cve_results = data.get('data', {}).get('attributes', {}).get('cves_data', {}).get('cves', [])
+        except Exception as e:
+            logger.error(f"Failed to parse pro api output: {e}")
+            host.data.skip_cve_tasks = True
+    else:
+        logger.error(f"pro api command failed or returned empty output: {res[1].stderr}")
+        host.data.skip_cve_tasks = True
+
+
+def _finalize(state, host):
+    if host.data.get('skip_cve_tasks'):
+        return
+
+    cve_results = host.data.get('cve_results', [])
+    csv_date = datetime.now().strftime('%Y%m%d')
+    os.makedirs("output/check_cve", exist_ok=True)
+    summary_path = f"output/check_cve/summary_{host.name}_{csv_date}.csv"
+
+    # Helper to humanize the plan operations
+    def get_action_desc(plan):
+        if not plan:
+            return "No plan available"
+        ops = []
+        for p in plan:
+            op = p.get('operation')
+            if op == 'attach':
+                ops.append("Attach Pro")
+            elif op == 'enable':
+                ops.append(f"Enable {p.get('data', {}).get('service', 'service')}")
+            elif op == 'apt-upgrade':
+                ops.append("Apt Upgrade")
+            else:
+                ops.append(op)
+        return " -> ".join(ops)
+
+    # 1. Generate Summary CSV (sorted by CVE ID)
+    sorted_results = sorted(cve_results, key=lambda c: c.get('title', ''))
+    with open(summary_path, "w", encoding='utf-8', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(["CVE ID", "Current Status", "Expected Status", "Packages", "Action Needed"])
+        
+        for cve in sorted_results:
+            writer.writerow([
+                cve.get('title'),
+                cve.get('current_status'),
+                cve.get('expected_status'),
+                ", ".join(cve.get('affected_packages', [])),
+                get_action_desc(cve.get('plan', []))
+            ])
+    
+    logger.info(f"Summary report generated at: {summary_path}")
+
+    # 2. Prepare for Execution
     run_update_raw = host.data.get('run_update', os.getenv('RUN_UPDATE', False))
     run_update = str(run_update_raw).lower() in ['true', 'yes', '1', 'y']
     
-    if run_update and os.path.exists(plan_csv_path):
-        with open(plan_csv_path, "r") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                cmd = row.get('command')
-                if cmd:
-                    logger.info(f"Running update command: {cmd}")
-                    host.run_shell_command(cmd, _sudo=True)
+    if run_update:
+        # Only execute for those still affected and having a plan
+        patchable_cves = [
+            c.get('title') for c in cve_results 
+            if c.get('current_status') == 'still-affected' and c.get('plan')
+        ]
+        
+        if patchable_cves:
+            logger.info(f"Found {len(patchable_cves)} patchable CVEs. Preparing execution...")
+            payload = json.dumps({"cves": patchable_cves})
+            
+            # Use server.shell for better dry-run visibility
+            server.shell(
+                name="Execute CVE fixes via pro api",
+                commands=[f"pro api u.pro.security.fix.cve.execute.v1 --data '{payload}'"],
+                _sudo=True,
+                _sudo_password=host.data.get('sudo_password'),
+                _env={"LC_ALL": "C"}
+            )
+        else:
+            logger.info("No patchable CVEs found to execute.")
 
-    # Run make_summary.py
-    if os.path.exists("files/check_cve/make_summary.py"):
-        subprocess.run(["python3", "files/check_cve/make_summary.py", check_csv_path, fix_csv_path, summary_csv_path])
-        logger.info(f"Summary report generated at: {summary_csv_path}")
-    else:
-        logger.warning("make_summary.py not found.")
-
-
-# Dummy operation to force Pyinfra to prompt for the sudo password if --use-sudo-password is set.
-# Without a standard operation requiring _sudo=True, Pyinfra skips the password prompt for python.call operations.
-server.shell(
-    name="Init sudo credentials",
-    commands=["echo 'Sudo initialized'"],
+# Execution Flow
+python.call(
+    name="0.get (Fetch CVEs)",
+    function=_get_cves,
     _sudo=True
 )
 
 python.call(
-    name="0.get (Fetch CVEs)",
-    function=_get_cves
+    name="1.scan_and_plan (Pro API Plan)",
+    function=_scan_and_plan,
+    _sudo=True
 )
 
 python.call(
-    name="1.check (Check CVEs locally)",
-    function=_check_cves
-)
-
-python.call(
-    name="2.fix_info (Dry-run fix)",
-    function=_fix_info
-)
-
-python.call(
-    name="3.update & 4.summary",
-    function=_update_and_summary
+    name="2.finalize (Report & Execute)",
+    function=_finalize,
+    _sudo=True
 )
