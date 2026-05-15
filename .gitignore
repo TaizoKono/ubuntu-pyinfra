@@ -11,3 +11,6 @@ wheels/
 
 # ansible files
 ansible/
+
+# output files
+output/*
