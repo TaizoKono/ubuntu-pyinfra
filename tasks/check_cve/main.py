@@ -54,18 +54,36 @@ def _get_cves(state, host):
         if s1_token:
             url = f"https://apse1-globalsoc.sentinelone.net/web/api/v2.1/application-management/risks?endpointName__contains={target_hostname}&severities={s1_api_severity}&limit=1000"
             headers = {"Authorization": f"ApiToken {s1_token}"}
-            try:
-                resp = requests.get(url, headers=headers)
-                if resp.status_code == 200:
-                    data = resp.json().get("data", [])
-                    for item in data:
-                        cve_id = item.get("cveId")
-                        if cve_id and cve_id not in s1_cve_list:
-                            s1_cve_list.append(cve_id)
-                else:
-                    logger.warning(f"S1 API returned status {resp.status_code}")
-            except Exception as e:
-                logger.warning(f"Failed to fetch from S1: {e}")
+            
+            # Retry logic for API calls (especially for 429 Rate Limiting)
+            max_retries = 3
+            import time
+            import random
+
+            for attempt in range(max_retries):
+                try:
+                    resp = requests.get(url, headers=headers)
+                    if resp.status_code == 200:
+                        data = resp.json().get("data", [])
+                        for item in data:
+                            cve_id = item.get("cveId")
+                            if cve_id and cve_id not in s1_cve_list:
+                                s1_cve_list.append(cve_id)
+                        break # Success
+                    elif resp.status_code == 429:
+                        # Rate limited: wait and retry
+                        wait_time = (2 ** attempt) + random.random()
+                        logger.warning(f"S1 API Rate limited (429) for {host.name}. Retrying in {wait_time:.2f}s... (Attempt {attempt+1}/{max_retries})")
+                        time.sleep(wait_time)
+                    elif resp.status_code == 401:
+                        logger.error(f"S1 API Unauthorized (401) for {host.name}. Please check your token.")
+                        break # Auth error won't be fixed by retry
+                    else:
+                        logger.warning(f"S1 API returned status {resp.status_code} for {host.name}")
+                        break
+                except Exception as e:
+                    logger.warning(f"Failed to fetch from S1 for {host.name}: {e}")
+                    time.sleep(1)
         else:
             logger.warning("No S1 token found at files/check_cve/token")
 
@@ -192,7 +210,8 @@ def _finalize(state, host):
 python.call(
     name="0.get (Fetch CVEs)",
     function=_get_cves,
-    _sudo=True
+    _sudo=True,
+    _parallel=1  # S1 APIのレート制限回避のため、1台ずつ順番に実行
 )
 
 python.call(
