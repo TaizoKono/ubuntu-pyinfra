@@ -179,8 +179,8 @@ def _finalize(state, host):
                 cve.get('title'),
                 cve.get('current_status'),
                 cve.get('expected_status'),
-                ", ".join(cve.get('affected_packages', [])),
-                get_action_desc(cve.get('plan', []))
+                ", ".join(cve.get('affected_packages') or []),
+                get_action_desc(cve.get('plan') or [])
             ])
     
     logger.info(f"Summary report generated at: {summary_path}")
@@ -193,7 +193,7 @@ def _finalize(state, host):
     exclude_pro = str(exclude_pro_raw).lower() in ['true', 'yes', '1', 'y']
     
     def needs_pro(plan):
-        return any(p.get('operation') in ['attach', 'enable'] for p in plan)
+        return any(p.get('operation') in ['attach', 'enable'] for p in (plan or []))
     
     if run_update:
         # Only execute for those still affected and having a plan
