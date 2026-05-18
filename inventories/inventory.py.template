@@ -1,0 +1,20 @@
+import getpass
+
+# 実行時に一度だけパスワードの入力を求めるプロンプトを表示します。
+# 収集したパスワードは各ホストの sudo_password として使用されます。
+try:
+    collected_password = getpass.getpass("Sudo password: ")
+except EOFError:
+    collected_password = None
+
+target = [
+    # 各ホストに共通のパスワードを割り当て
+    ("ollo1-new", {"sudo_password": collected_password}),
+    ("ollo2-new", {"sudo_password": collected_password}),
+    ("ollo3-new", {"sudo_password": collected_password}),
+    ("ollo4-new", {"sudo_password": collected_password}),
+    ("ollo5-new", {"sudo_password": collected_password}),
+    ("ollo6-new", {"sudo_password": collected_password}),
+    ("ollo7-new", {"sudo_password": collected_password}),
+    ("ollo8-new", {"sudo_password": collected_password}),
+]
