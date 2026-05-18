@@ -57,3 +57,12 @@ uv run pyinfra inventories/inventory.py deploys/deploy_check_cve.py --data only_
 - **Ubuntu Pro**: 実機スキャンや詳細プラン取得には、対象サーバーが Ubuntu Pro に紐付いている必要があります。
 - **S1 Token**: APIモードを利用する場合、`files/check_cve/token` に有効なApiTokenが配置されている必要があります。
 - **inventory.py**: 対象ホストおよびSudoパスワードの収集設定が完了していること。
+
+## 5. レート制限と実行制御
+
+SentinelOne API等の外部サービスへの負荷および429 (Too Many Requests) レートリミットを防ぐため、以下の対策が自動で適用されています。
+
+- **順次実行 (シーケンシャル処理)**:
+  `0.get (Fetch CVEs)` フェーズは、外部APIへのリクエスト集中を避けるため、ホスト1台ずつ順番に実行されます。後続の `1.scan_and_plan` や `2.finalize` は並列で高速に実行されます。
+- **自動リトライ (指数バックオフ)**:
+  S1 APIで429制限を検知した場合、ランダムなディレイを挟みながら最大3回まで自動リトライを行います。

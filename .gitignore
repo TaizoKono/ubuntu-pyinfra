@@ -14,3 +14,6 @@ ansible/
 
 # output files
 output/*
+
+# secrets files
+files/check_cve/token
