@@ -18,12 +18,20 @@ S1を経由せず、サーバー上で直接 `pro cves` コマンドを実行し
 uv run pyinfra inventories/inventory.py deploys/deploy_check_cve.py --data no_s1=true
 ```
 
+### パターンC: 特定のCVE番号をピンポイントで調査
+S1や実機スキャンを行わず、指定した特定のCVE番号のみを直接調査対象とします（カンマ区切りで複数指定可能）。
+```bash
+uv run pyinfra inventories/inventory.py deploys/deploy_check_cve.py --data cves="CVE-2024-31578,CVE-2023-2640"
+```
+
+
 ## 2. 主要なオプション (--data)
 
 実行コマンドの末尾に `--data オプション名=値` を付与して制御します。
 
 | オプション | 値 | 内容 |
 | :--- | :--- | :--- |
+| `cves` | `"CVE-XXXX-YYYY,..."` | 特定のCVE番号のみをピンポイントでチェック対象にする |
 | `no_s1` | `true` | SentinelOne APIを使用せず、実機スキャンを実行する |
 | `only_critical` | `true` | 重要度が "Critical" のものだけに絞り込む (デフォルトは High以上) |
 | `exclude_pro` | `true` | Ubuntu Pro登録やサービス有効化が必要な修正を除外する |

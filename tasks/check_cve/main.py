@@ -8,6 +8,20 @@ from pyinfra.operations import python, server
 from pyinfra import logger
 
 def _get_cves(state, host):
+    # Check if specific CVEs are requested via CLI parameter
+    cves_raw = host.data.get('cves')
+    if cves_raw:
+        if isinstance(cves_raw, list):
+            target_cves = [str(c).strip().upper() for c in cves_raw if str(c).strip()]
+        else:
+            target_cves = [c.strip().upper() for c in str(cves_raw).split(',') if c.strip()]
+        
+        if target_cves:
+            logger.info(f"Target CVEs specified via CLI: {target_cves}")
+            host.data.cve_list = sorted(list(set(target_cves)))
+            host.data.skip_cve_tasks = False
+            return
+
     # Determine source (S1 or local scan)
     no_s1_raw = host.data.get('no_s1', os.getenv('NO_S1', False))
     no_s1 = str(no_s1_raw).lower() in ['true', 'yes', '1', 'y']
