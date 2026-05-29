@@ -34,7 +34,7 @@ def _install(state, host):
     server.shell(
         name=f"Install {', '.join(to_install)}",
         commands=[
-            "apt-get update",
+            "apt-get update || true",
             f"DEBIAN_FRONTEND=noninteractive apt-get install -y {' '.join(to_install)}",
         ],
         _sudo=True,
