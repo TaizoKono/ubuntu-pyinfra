@@ -8,6 +8,7 @@ Pyinfraを使用してUbuntuサーバ群を管理するツールです。
 | :--- | :--- | :--- |
 | `check_cve` | CVE脆弱性の検出・レポート・パッチ適用 | [docs/check_cve.md](docs/check_cve.md) |
 | `install_deb` | debパッケージの転送・インストール | [docs/install_deb.md](docs/install_deb.md) |
+| `install_apt` | aptリポジトリからパッケージをインストール | [docs/install_apt.md](docs/install_apt.md) |
 
 ## 基本的な使い方
 
