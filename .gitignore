@@ -17,4 +17,8 @@ output/*
 
 # secrets files
 files/check_cve/token
-inventories/inventory.py
+inventories/inventory*.py
+
+# log files
+*.log
+*.txt
