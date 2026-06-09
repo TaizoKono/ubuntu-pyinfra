@@ -1,5 +1,7 @@
 import os
 import csv
+import re
+import shlex
 from pyinfra.operations import python, server
 from pyinfra import host, logger
 
@@ -22,12 +24,25 @@ def _load_targets_csv(csv_path: str) -> dict:
     return targets
 
 
+def _validate_kernel_version(kernel_version: str) -> str:
+    """Validate kernel version format to prevent command injection."""
+    if not kernel_version or not isinstance(kernel_version, str):
+        raise ValueError(f"Invalid kernel version: {kernel_version!r}")
+    # Allow alphanumeric, dot, hyphen, plus (standard kernel version pattern)
+    if not re.fullmatch(r'[A-Za-z0-9._+-]+', kernel_version):
+        raise ValueError(f"Invalid kernel version format: {kernel_version!r}")
+    return kernel_version
+
+
 def _resolve_target_kernel(hostname: str, cli_kernel: str | None = None) -> str | None:
     """Resolve target kernel version: CLI > targets.csv."""
     if cli_kernel:
-        return cli_kernel
+        return _validate_kernel_version(cli_kernel)
     targets = _load_targets_csv("files/kernel/targets.csv")
-    return targets.get(hostname)
+    target = targets.get(hostname)
+    if target:
+        return _validate_kernel_version(target)
+    return None
 
 
 # Module-level: resolve targets and get current kernel for dry-run visibility
@@ -91,11 +106,15 @@ def _install(state, host):
     if not target_kernel:
         raise Exception(f"[{host.name}] target_kernel not set; did _pre_check run?")
 
+    # Build package names with shell escaping
+    image_pkg = shlex.quote(f'linux-image-{target_kernel}')
+    headers_pkg = shlex.quote(f'linux-headers-{target_kernel}')
+
     server.shell(
         name=f"Install kernel {target_kernel}",
         commands=[
             "apt-get update || true",
-            f"DEBIAN_FRONTEND=noninteractive apt-get install -y linux-image-{target_kernel} linux-headers-{target_kernel}",
+            f"DEBIAN_FRONTEND=noninteractive apt-get install -y {image_pkg} {headers_pkg}",
             "update-grub",
         ],
         _sudo=True,
