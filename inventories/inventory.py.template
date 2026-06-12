@@ -9,12 +9,13 @@ except EOFError:
 
 target = [
     # 各ホストに共通のパスワードを割り当て
-    ("ollo1-new", {"sudo_password": collected_password}),
-    ("ollo2-new", {"sudo_password": collected_password}),
-    ("ollo3-new", {"sudo_password": collected_password}),
-    ("ollo4-new", {"sudo_password": collected_password}),
-    ("ollo5-new", {"sudo_password": collected_password}),
-    ("ollo6-new", {"sudo_password": collected_password}),
-    ("ollo7-new", {"sudo_password": collected_password}),
-    ("ollo8-new", {"sudo_password": collected_password}),
+    # is_gpu: True の場合、update_kernel タスクで Nvidia ドライバも更新します
+    ("ollo1-new", {"sudo_password": collected_password, "is_gpu": False}),
+    ("ollo2-new", {"sudo_password": collected_password, "is_gpu": False}),
+    ("ollo3-new", {"sudo_password": collected_password, "is_gpu": False}),
+    ("ollo4-new", {"sudo_password": collected_password, "is_gpu": False}),
+    ("ollo5-new", {"sudo_password": collected_password, "is_gpu": True}),
+    ("ollo6-new", {"sudo_password": collected_password, "is_gpu": True}),
+    ("ollo7-new", {"sudo_password": collected_password, "is_gpu": True}),
+    ("ollo8-new", {"sudo_password": collected_password, "is_gpu": True}),
 ]

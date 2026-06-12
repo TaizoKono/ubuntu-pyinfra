@@ -1,84 +1,110 @@
 import os
-import csv
 import re
-import shlex
+import csv
+import threading
 from pyinfra.operations import python, server
 from pyinfra import host, logger
 
 
-def _load_targets_csv(csv_path: str) -> dict:
-    """Load hostname -> kernel_version mapping from CSV file."""
-    targets = {}
-    if not os.path.exists(csv_path):
-        return targets
+def _validate_nvidia_driver_param(value):
+    """nvidia_driver パラメータが数字のみ（例: 535, 570）であることを検証する。"""
+    if value is not None and not re.fullmatch(r'[0-9]{2,4}', str(value)):
+        raise ValueError(
+            f"Invalid nvidia_driver value: {value!r}. "
+            "Specify a numeric major version only (e.g. --data nvidia_driver=535)."
+        )
+
+_kernel_results = {}
+_results_lock = threading.Lock()
+
+
+def _write_kernel_csv():
+    os.makedirs("output/update_kernel", exist_ok=True)
     try:
-        with open(csv_path, 'r') as f:
-            reader = csv.reader(f)
-            for row in reader:
-                if not row or row[0].startswith('#'):
-                    continue
-                if len(row) >= 2:
-                    targets[row[0].strip()] = row[1].strip()
+        with open("output/update_kernel/kernel_current.csv", "w", newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(["hostname", "before", "after", "status", "driver_before", "driver_after", "driver_status"])
+            for h, d in sorted(_kernel_results.items()):
+                writer.writerow([
+                    h,
+                    d['before'], d['after'], d['status'],
+                    d.get('driver_before', ''), d.get('driver_after', ''), d.get('driver_status', ''),
+                ])
     except Exception as e:
-        logger.warning(f"Failed to load targets.csv: {e}")
-    return targets
+        logger.error(f"Failed to write kernel_current.csv: {e}")
 
 
-def _validate_kernel_version(kernel_version: str) -> str:
-    """Validate kernel version format to prevent command injection."""
-    if not kernel_version or not isinstance(kernel_version, str):
-        raise ValueError(f"Invalid kernel version: {kernel_version!r}")
-    # Allow alphanumeric, dot, hyphen, plus (standard kernel version pattern)
-    if not re.fullmatch(r'[A-Za-z0-9._+-]+', kernel_version):
-        raise ValueError(f"Invalid kernel version format: {kernel_version!r}")
-    return kernel_version
+# Module-level: get current/planned kernel and driver for dry-run visibility
+_ok, _res = host.run_shell_command("uname -r", _env={"LC_ALL": "C"})
+_current = _res.stdout.strip() if _ok else "(unknown)"
+logger.info(f"[{host.name}] Current kernel: {_current}")
 
-
-def _resolve_target_kernel(hostname: str, cli_kernel: str | None = None) -> str | None:
-    """Resolve target kernel version: CLI > targets.csv."""
-    if cli_kernel:
-        return _validate_kernel_version(cli_kernel)
-    targets = _load_targets_csv("files/kernel/targets.csv")
-    target = targets.get(hostname)
-    if target:
-        return _validate_kernel_version(target)
-    return None
-
-
-# Module-level: resolve targets and get current kernel for dry-run visibility
-_cli_kernel = host.data.get('kernel')
-_target_kernel = _resolve_target_kernel(host.name, _cli_kernel)
-
-if _target_kernel:
-    # Current kernel (SSH: works even in --dry-run since we're already connected)
-    _ok, _res = host.run_shell_command("uname -r", _env={"LC_ALL": "C"})
-    _current = _res.stdout.strip() if _ok else "(unknown)"
-
-    if _current == _target_kernel:
-        logger.info(f"[{host.name}] Current: {_current} == Target: {_target_kernel} → no update needed")
-    else:
-        logger.info(f"[{host.name}] Current: {_current} → Target: {_target_kernel} (update needed)")
+_ok_p, _res_p = host.run_shell_command(
+    "apt-cache depends linux-image-generic 2>/dev/null"
+    " | awk '/Depends:/ && /linux-image-[0-9]/{print $2}'",
+    _env={"LC_ALL": "C"},
+)
+_planned_pkg = _res_p.stdout.strip() if _ok_p else ""
+_planned_kernel = _planned_pkg.replace("linux-image-", "") if _planned_pkg else "(unavailable)"
+if _planned_kernel == _current:
+    logger.info(f"[{host.name}] Planned kernel: {_planned_kernel} (already up to date)")
 else:
-    logger.warning(f"[{host.name}] No target kernel specified (use --data kernel=... or files/kernel/targets.csv)")
+    logger.info(f"[{host.name}] Planned kernel: {_planned_kernel}")
+
+if host.data.get('is_gpu'):
+    # $() サブシェルで stdout を捕捉することで、失敗時に nvidia-smi のエラー出力が
+    # 混入するのを防ぐ（|| だけでは失敗したコマンドの stdout も出力される）
+    _ok2, _res2 = host.run_shell_command(
+        'ver=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null)'
+        ' && printf "%s" "$ver" || echo "(no driver)"',
+        _env={"LC_ALL": "C"},
+    )
+    _drv = _res2.stdout.strip() if _ok2 else "(unknown)"
+    logger.info(f"[{host.name}] Current Nvidia driver: {_drv}")
+
+    # メジャーバージョン比較には dpkg を使う（NVML が壊れていても確実に取得できる）
+    _ok_m, _res_m = host.run_shell_command(
+        "dpkg-query -W -f='${Package}\\n' 'nvidia-driver-[0-9]*' 2>/dev/null"
+        " | grep -oP '(?<=nvidia-driver-)\\d+' | sort -V | tail -1",
+        _env={"LC_ALL": "C"},
+    )
+    _current_major = _res_m.stdout.strip() if (_ok_m and _res_m.stdout.strip()) else ""
+
+    _nvidia_driver_param = host.data.get('nvidia_driver')
+    if _nvidia_driver_param:
+        _validate_nvidia_driver_param(_nvidia_driver_param)
+        _ok3, _res3 = host.run_shell_command(
+            f"apt-cache policy nvidia-driver-{_nvidia_driver_param} 2>/dev/null"
+            " | awk '/Candidate:/{print $2}'",
+            _env={"LC_ALL": "C"},
+        )
+        _planned_drv_ver = _res3.stdout.strip() if (_ok3 and _res3.stdout.strip()) else "(unavailable)"
+        logger.info(f"[{host.name}] Planned Nvidia driver: nvidia-driver-{_nvidia_driver_param} ({_planned_drv_ver})")
+        if _current_major and _current_major != str(_nvidia_driver_param):
+            logger.warning(
+                f"[{host.name}] WARNING: Nvidia driver major version will change:"
+                f" {_current_major} -> {_nvidia_driver_param}"
+            )
+    else:
+        _ok3, _res3 = host.run_shell_command(
+            "ubuntu-drivers devices 2>/dev/null"
+            " | awk '/recommended/{for(i=1;i<=NF;i++) if($i~/nvidia-driver-[0-9]/) print $i}'"
+            " | head -1",
+            _env={"LC_ALL": "C"},
+        )
+        _planned_drv = _res3.stdout.strip() if (_ok3 and _res3.stdout.strip()) else "(unavailable)"
+        logger.info(f"[{host.name}] Planned Nvidia driver: {_planned_drv}")
 
 
 def _pre_check(state, host):
-    target_kernel = _resolve_target_kernel(host.name, host.data.get('kernel'))
-    if not target_kernel:
-        raise ValueError(
-            f"[{host.name}] No target kernel specified. "
-            "Use --data kernel=<version> or configure files/kernel/targets.csv"
-        )
-
-    # Current kernel
     ok, res = host.run_shell_command("uname -r", _env={"LC_ALL": "C"})
     if not ok:
         raise Exception(f"[{host.name}] Failed to get current kernel version")
     current_kernel = res.stdout.strip()
 
     logger.info(f"[{host.name}] Current kernel: {current_kernel}")
+    host.data.before_kernel = current_kernel
 
-    # Installed kernels
     ok, res = host.run_shell_command(
         "dpkg -l | grep 'linux-image-' | grep '^ii'",
         _env={"LC_ALL": "C"},
@@ -88,33 +114,44 @@ def _pre_check(state, host):
         for line in res.stdout.strip().splitlines():
             logger.info(f"[{host.name}]   {line}")
 
-    # Skip if already running target kernel
-    if current_kernel == target_kernel:
-        logger.info(f"[{host.name}] Already running target kernel {target_kernel}. Skipping update.")
-        host.data.skip_kernel_update = True
-        return
+    if host.data.get('is_gpu'):
+        ok, res = host.run_shell_command(
+            'ver=$(nvidia-smi --query-gpu=name,driver_version --format=csv,noheader 2>/dev/null)'
+            ' && printf "%s" "$ver" || true',
+            _env={"LC_ALL": "C"},
+        )
+        if ok and res.stdout.strip():
+            logger.info(f"[{host.name}] Current Nvidia GPU info:")
+            for line in res.stdout.strip().splitlines():
+                logger.info(f"[{host.name}]   {line}")
+            host.data.before_driver = res.stdout.strip().split(',')[-1].strip()
+        else:
+            logger.info(f"[{host.name}] nvidia-smi unavailable (NVML error or no driver).")
+            host.data.before_driver = "(no driver)"
 
-    host.data.target_kernel = target_kernel
-    host.data.skip_kernel_update = False
+        # メジャーバージョン比較用・再起動判定用: dpkg から取得（NVML 不要）
+        ok_m, res_m = host.run_shell_command(
+            "dpkg-query -W -f='${Package}\\n' 'nvidia-driver-[0-9]*' 2>/dev/null"
+            " | grep -oP '(?<=nvidia-driver-)\\d+' | sort -V | tail -1",
+            _env={"LC_ALL": "C"},
+        )
+        host.data.before_driver_major = res_m.stdout.strip() if (ok_m and res_m.stdout.strip()) else ""
+
+        # インストール前の完全バージョン文字列を記録（インストール後と比較して再起動要否を判定）
+        ok_dpkg, res_dpkg = host.run_shell_command(
+            "dpkg-query -W -f='${Package} ${Version}\\n' 'nvidia-driver-[0-9]*' 2>/dev/null"
+            " | grep -v '^$' | sort -V | tail -1",
+            _env={"LC_ALL": "C"},
+        )
+        host.data.before_driver_dpkg = res_dpkg.stdout.strip() if ok_dpkg else ""
 
 
 def _install(state, host):
-    if host.data.get('skip_kernel_update'):
-        return
-
-    target_kernel = host.data.get('target_kernel')
-    if not target_kernel:
-        raise Exception(f"[{host.name}] target_kernel not set; did _pre_check run?")
-
-    # Build package names with shell escaping
-    image_pkg = shlex.quote(f'linux-image-{target_kernel}')
-    headers_pkg = shlex.quote(f'linux-headers-{target_kernel}')
-
     server.shell(
-        name=f"Install kernel {target_kernel}",
+        name="Install latest kernel via generic metapackages",
         commands=[
             "apt-get update || true",
-            f"DEBIAN_FRONTEND=noninteractive apt-get install -y {image_pkg} {headers_pkg}",
+            "DEBIAN_FRONTEND=noninteractive apt-get install -y linux-image-generic linux-headers-generic",
             "update-grub",
         ],
         _sudo=True,
@@ -122,54 +159,216 @@ def _install(state, host):
         _env={"LC_ALL": "C"},
     )
 
+    # /var/run/reboot-required フラグの確認
+    ok, res = host.run_shell_command(
+        "test -f /var/run/reboot-required && echo 'yes' || echo 'no'"
+    )
+    reboot_required_flag = ok and res.stdout.strip() == 'yes'
 
-def _reboot(state, host):
-    if host.data.get('skip_kernel_update'):
+    # インストール済み最新カーネルと実行中カーネルの比較
+    # (apt-get install が no-op だった場合 /var/run/reboot-required は作成されないため)
+    ok2, res2 = host.run_shell_command(
+        "dpkg -l 'linux-image-*-generic' | awk '/^ii/{print $2}'"
+        " | grep -v '^linux-image-generic$' | sort -V | tail -1 | sed 's/linux-image-//'",
+        _env={"LC_ALL": "C"},
+    )
+    latest_installed = res2.stdout.strip() if ok2 else ""
+
+    ok3, res3 = host.run_shell_command("uname -r", _env={"LC_ALL": "C"})
+    running_kernel = res3.stdout.strip() if ok3 else ""
+
+    needs_reboot = reboot_required_flag or (
+        bool(latest_installed) and latest_installed != running_kernel
+    )
+
+    if needs_reboot:
+        if not reboot_required_flag and latest_installed != running_kernel:
+            logger.info(
+                f"[{host.name}] Newer kernel {latest_installed} is installed "
+                f"but not running ({running_kernel}). Reboot required."
+            )
+        host.data.skip_reboot = False
+    else:
+        logger.info(f"[{host.name}] Kernel is already up to date. No reboot required.")
+        host.data.skip_reboot = True
+
+
+def _nvidia_install(state, host):
+    if not host.data.get('is_gpu'):
         return
 
-    server.reboot(
-        name="Reboot to apply new kernel",
-        delay=3,
-        timeout=300,
-        interval=5,
+    nvidia_driver_param = host.data.get('nvidia_driver')
+    _validate_nvidia_driver_param(nvidia_driver_param)
+
+    # メジャーバージョン変更の警告（dpkg ベースで比較。NVML 不要）
+    before_driver_major = host.data.get('before_driver_major', '')
+    if nvidia_driver_param and before_driver_major and before_driver_major != str(nvidia_driver_param):
+        logger.warning(
+            f"[{host.name}] WARNING: Nvidia driver major version will change:"
+            f" {before_driver_major} -> {nvidia_driver_param}"
+        )
+
+    if nvidia_driver_param:
+        commands = [
+            f"DEBIAN_FRONTEND=noninteractive apt-get install -y nvidia-driver-{nvidia_driver_param}",
+        ]
+        op_name = f"Install Nvidia driver nvidia-driver-{nvidia_driver_param} via apt"
+    else:
+        commands = [
+            "DEBIAN_FRONTEND=noninteractive apt-get install -y ubuntu-drivers-common",
+            "ubuntu-drivers autoinstall",
+        ]
+        op_name = "Install/update Nvidia driver via ubuntu-drivers"
+
+    # update-initramfs を明示実行して initramfs にドライバモジュールを確実に反映させる。
+    # apt の postinst が呼ばれない場合でもバージョンミスマッチを防ぐ。
+    commands = commands + ["update-initramfs -u -k all"]
+
+    server.shell(
+        name=op_name,
+        commands=commands,
         _sudo=True,
         _sudo_password=host.data.get('sudo_password'),
+        _env={"LC_ALL": "C"},
     )
+
+    # インストール後の dpkg バージョンを取得してインストール前後を比較
+    ok_after, res_after = host.run_shell_command(
+        "dpkg-query -W -f='${Package} ${Version}\\n' 'nvidia-driver-[0-9]*' 2>/dev/null"
+        " | grep -v '^$' | sort -V | tail -1",
+        _env={"LC_ALL": "C"},
+    )
+    after_driver_dpkg = res_after.stdout.strip() if ok_after else ""
+    before_driver_dpkg = host.data.get('before_driver_dpkg', '')
+
+    ok_rb, res_rb = host.run_shell_command(
+        "test -f /var/run/reboot-required && echo 'yes' || echo 'no'"
+    )
+    reboot_flag = ok_rb and res_rb.stdout.strip() == 'yes'
+
+    # /var/run/reboot-required フラグ OR dpkg バージョン変化のどちらかで再起動。
+    # nvidia ドライバは apt が reboot-required を設定しないケースがあるため
+    # dpkg バージョン比較を主判定とする。
+    driver_changed = bool(after_driver_dpkg) and after_driver_dpkg != before_driver_dpkg
+    if reboot_flag or driver_changed:
+        host.data.skip_reboot = False
+        if driver_changed:
+            logger.info(
+                f"[{host.name}] Nvidia driver changed"
+                f" ({before_driver_dpkg} -> {after_driver_dpkg}). Reboot required."
+            )
+    else:
+        logger.info(f"[{host.name}] Nvidia driver is already up to date. No reboot required.")
+
+
+def _reboot(state, host):
+    if host.data.get('skip_reboot'):
+        return
+
+    import time
+
+    logger.info(f"[{host.name}] Initiating reboot...")
+    # Use host.run_shell_command instead of server.reboot() because server.reboot()
+    # clears askpass files before running reboot, causing sudo auth to fail.
+    try:
+        host.run_shell_command(
+            "reboot",
+            _sudo=True,
+            _sudo_password=host.data.get('sudo_password'),
+            _env={"LC_ALL": "C"},
+        )
+    except Exception:
+        pass  # Connection drop after reboot is expected
+
+    # シャットダウンが完全に開始するのを待ってから disconnect する。
+    # 短すぎると旧 SSH セッションへの誤接続が起きるため 30s 待つ。
+    time.sleep(30)
+    host.connector_data["sudo_askpass_path"] = None
+    host.connector_data["su_askpass_path"] = None
+    host.disconnect()
+    logger.info(f"[{host.name}] Reboot initiated. post_check will wait for reconnection.")
 
 
 def _post_check(state, host):
-    if host.data.get('skip_kernel_update'):
-        return
+    import time
 
-    target_kernel = host.data.get('target_kernel')
+    if not host.data.get('skip_reboot'):
+        reboot_timeout = 300
+        interval = 10
+        max_retries = reboot_timeout // interval
 
-    # Current kernel after reboot
+        logger.info(f"[{host.name}] Waiting for server to come back online...")
+        reconnected = False
+        for retry in range(max_retries + 1):
+            host.connect(show_errors=False)
+            if host.connected:
+                elapsed = 30 + retry * interval
+                logger.info(f"[{host.name}] Server back online (~{elapsed}s)")
+                reconnected = True
+                break
+            time.sleep(interval)
+
+        if not reconnected:
+            raise Exception(
+                f"[{host.name}] Server did not come back online within {30 + reboot_timeout}s after reboot. "
+                "Please check the server console."
+            )
+
     ok, res = host.run_shell_command("uname -r", _env={"LC_ALL": "C"})
     current = res.stdout.strip() if ok else "(unknown)"
 
-    logger.info(f"[{host.name}] Kernel after reboot: {current}")
-    if current != target_kernel:
-        logger.warning(f"[{host.name}] Expected {target_kernel}, but running {current}")
+    logger.info(f"[{host.name}] Kernel after update: {current}")
+    before = host.data.get('before_kernel', '(unknown)')
+    kernel_status = "updated" if before != current else "no_change"
+    logger.info(f"[{host.name}] Kernel status: {kernel_status} ({before} -> {current})")
 
-    # Installed kernels
+    driver_before = ""
+    driver_after = ""
+    driver_status = ""
+
+    if host.data.get('is_gpu'):
+        ok, res = host.run_shell_command(
+            "nvidia-smi --query-gpu=name,driver_version --format=csv,noheader 2>/dev/null",
+            _env={"LC_ALL": "C"},
+        )
+        if ok and res.stdout.strip():
+            logger.info(f"[{host.name}] Nvidia GPU info after update:")
+            for line in res.stdout.strip().splitlines():
+                logger.info(f"[{host.name}]   {line}")
+            driver_after = res.stdout.strip().split(',')[-1].strip()
+        else:
+            logger.warning(f"[{host.name}] nvidia-smi failed after update. Driver may not be loaded.")
+            driver_after = "(unavailable)"
+
+        driver_before = host.data.get('before_driver', '(unknown)')
+        driver_status = "updated" if driver_before != driver_after else "no_change"
+        logger.info(f"[{host.name}] Driver status: {driver_status} ({driver_before} -> {driver_after})")
+
+    with _results_lock:
+        _kernel_results[host.name] = {
+            'before': before,
+            'after': current,
+            'status': kernel_status,
+            'driver_before': driver_before,
+            'driver_after': driver_after,
+            'driver_status': driver_status,
+        }
+        _write_kernel_csv()
+
     ok, res = host.run_shell_command(
-        "dpkg -l | grep 'linux-image-' | grep '^ii'",
-        _env={"LC_ALL": "C"},
+        "dpkg -l | grep 'linux-image-' | grep '^ii'", _env={"LC_ALL": "C"},
     )
     if ok and res.stdout.strip():
         logger.info(f"[{host.name}] Installed kernels after update:")
         for line in res.stdout.strip().splitlines():
             logger.info(f"[{host.name}]   {line}")
 
-    # Reboot required flag
     ok, res = host.run_shell_command("test -f /var/run/reboot-required && echo 'yes' || echo 'no'")
     reboot_required = res.stdout.strip() == 'yes'
     logger.info(f"[{host.name}] Reboot required: {reboot_required}")
 
-    # Kernel error log
     ok, res = host.run_shell_command(
-        "dmesg | grep -iE 'error|fail' | tail -20",
-        _env={"LC_ALL": "C"},
+        "dmesg | grep -iE 'error|fail' | tail -20", _env={"LC_ALL": "C"},
     )
     if ok and res.stdout.strip():
         logger.warning(f"[{host.name}] Kernel error/fail logs:")
@@ -180,23 +379,28 @@ def _post_check(state, host):
 
 
 python.call(
-    name="0.pre_check (Check current kernel and resolve target)",
+    name="0.pre_check (Check current kernel and Nvidia driver)",
     function=_pre_check,
 )
 
 python.call(
-    name="1.install (Install target kernel)",
+    name="1.install (Install latest kernel via generic metapackages)",
     function=_install,
     _sudo=True,
 )
 
 python.call(
-    name="2.reboot (Reboot to apply kernel)",
-    function=_reboot,
+    name="2.nvidia_install (Update Nvidia driver via ubuntu-drivers)",
+    function=_nvidia_install,
     _sudo=True,
 )
 
 python.call(
-    name="3.post_check (Verify kernel and check errors)",
+    name="3.reboot (Reboot to apply kernel and driver)",
+    function=_reboot,
+)
+
+python.call(
+    name="4.post_check (Verify kernel and Nvidia driver)",
     function=_post_check,
 )
