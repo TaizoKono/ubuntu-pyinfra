@@ -27,11 +27,15 @@ Nvidia ドライバが自動的に更新されます。
 
 ### カーネル
 
-**メタパッケージ経由での最新更新**
+**メタパッケージ経由での最新更新（GA / HWE 自動判定）**
 
-```bash
-apt-get install -y linux-image-generic linux-headers-generic
-```
+`pre_check` ステージで `linux-image-generic-hwe-*` メタパッケージが導入済みかを確認し、
+GA / HWE を自動判定して適切なメタパッケージを使用します。
+
+| 種別 | 使用するメタパッケージ |
+| :--- | :--- |
+| GA | `linux-image-generic`, `linux-headers-generic` |
+| HWE | `linux-image-generic-hwe-<ubuntu-version>`, `linux-headers-generic-hwe-<ubuntu-version>` |
 
 - `apt` が依存関係をすべて自動解決
 - `linux-image-generic` の依存先 `linux-image-<version>-generic` が

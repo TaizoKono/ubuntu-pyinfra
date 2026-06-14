@@ -40,7 +40,10 @@ _current = _res.stdout.strip() if _ok else "(unknown)"
 logger.info(f"[{host.name}] Current kernel: {_current}")
 
 _ok_p, _res_p = host.run_shell_command(
-    "apt-cache depends linux-image-generic 2>/dev/null"
+    "meta=$(dpkg-query -W -f='${Package}\\n' 'linux-image-generic-hwe-*' 2>/dev/null"
+    " | sort -V | tail -1);"
+    " [ -z \"$meta\" ] && meta=linux-image-generic;"
+    " apt-cache depends \"$meta\" 2>/dev/null"
     " | awk '/Depends:/ && /linux-image-[0-9]/{print $2}'",
     _env={"LC_ALL": "C"},
 )
@@ -114,6 +117,24 @@ def _pre_check(state, host):
         for line in res.stdout.strip().splitlines():
             logger.info(f"[{host.name}]   {line}")
 
+    # HWE メタパッケージが存在する場合はそちらを使う
+    ok_hwe, res_hwe = host.run_shell_command(
+        "dpkg-query -W -f='${Package}\\n' 'linux-image-generic-hwe-*' 2>/dev/null"
+        " | sort -V | tail -1",
+        _env={"LC_ALL": "C"},
+    )
+    hwe_meta = res_hwe.stdout.strip() if (ok_hwe and res_hwe.stdout.strip()) else ""
+    if hwe_meta:
+        meta_image = hwe_meta
+        meta_headers = hwe_meta.replace("linux-image-", "linux-headers-")
+        logger.info(f"[{host.name}] Kernel series: HWE ({meta_image})")
+    else:
+        meta_image = "linux-image-generic"
+        meta_headers = "linux-headers-generic"
+        logger.info(f"[{host.name}] Kernel series: GA ({meta_image})")
+    host.data.kernel_meta_image = meta_image
+    host.data.kernel_meta_headers = meta_headers
+
     if host.data.get('is_gpu'):
         ok, res = host.run_shell_command(
             'ver=$(nvidia-smi --query-gpu=name,driver_version --format=csv,noheader 2>/dev/null)'
@@ -147,11 +168,13 @@ def _pre_check(state, host):
 
 
 def _install(state, host):
+    meta_image = host.data.get('kernel_meta_image', 'linux-image-generic')
+    meta_headers = host.data.get('kernel_meta_headers', 'linux-headers-generic')
     server.shell(
-        name="Install latest kernel via generic metapackages",
+        name=f"Install latest kernel via {meta_image}",
         commands=[
             "apt-get update || true",
-            "DEBIAN_FRONTEND=noninteractive apt-get install -y linux-image-generic linux-headers-generic",
+            f"DEBIAN_FRONTEND=noninteractive apt-get install -y {meta_image} {meta_headers}",
             "update-grub",
         ],
         _sudo=True,
@@ -167,9 +190,11 @@ def _install(state, host):
 
     # インストール済み最新カーネルと実行中カーネルの比較
     # (apt-get install が no-op だった場合 /var/run/reboot-required は作成されないため)
+    # grep -v でプレフィックスマッチ: linux-image-generic と linux-image-generic-hwe-* の
+    # 両メタパッケージを除外し、バージョン付きバイナリパッケージのみ残す
     ok2, res2 = host.run_shell_command(
         "dpkg -l 'linux-image-*-generic' | awk '/^ii/{print $2}'"
-        " | grep -v '^linux-image-generic$' | sort -V | tail -1 | sed 's/linux-image-//'",
+        " | grep -v '^linux-image-generic' | sort -V | tail -1 | sed 's/linux-image-//'",
         _env={"LC_ALL": "C"},
     )
     latest_installed = res2.stdout.strip() if ok2 else ""
