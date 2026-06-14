@@ -2,6 +2,7 @@ import os
 import json
 import re
 import csv
+import shlex
 import requests
 from datetime import datetime
 from pyinfra.operations import python, server
@@ -11,6 +12,8 @@ from pyinfra import logger
 # run_update 時に常に除外する（再起動なし適用を防ぐ）。
 _KERNEL_NVIDIA_PKGS = frozenset({'linux', 'linux-firmware'})
 _KERNEL_NVIDIA_PREFIXES = ('linux-', 'nvidia-')
+
+_CVE_RE = re.compile(r'^CVE-\d{4}-\d{4,7}$')
 
 def _is_kernel_or_nvidia(pkg):
     return pkg in _KERNEL_NVIDIA_PKGS or pkg.startswith(_KERNEL_NVIDIA_PREFIXES)
@@ -24,6 +27,12 @@ def _get_cves(state, host):
         else:
             target_cves = [c.strip().upper() for c in str(cves_raw).split(',') if c.strip()]
         
+        valid = [c for c in target_cves if _CVE_RE.match(c)]
+        invalid = set(target_cves) - set(valid)
+        for c in invalid:
+            logger.warning(f"Skipping invalid CVE ID format: {c!r}")
+        target_cves = valid
+
         if target_cves:
             logger.info(f"Target CVEs specified via CLI: {target_cves}")
             host.data.cve_list = sorted(list(set(target_cves)))
@@ -131,12 +140,12 @@ def _scan_and_plan(state, host):
     
     # Use pro api to get a structured fix plan in JSON
     res = host.run_shell_command(
-        f"pro api u.pro.security.fix.cve.plan.v1 --data '{payload}'",
+        f"pro api u.pro.security.fix.cve.plan.v1 --data {shlex.quote(payload)}",
         _sudo=True,
         _sudo_password=host.data.get('sudo_password'),
         _env={"LC_ALL": "C"}
     )
-    
+
     if res[0] and res[1].stdout:
         try:
             data = json.loads(res[1].stdout)
@@ -228,7 +237,7 @@ def _finalize(state, host):
             # Use server.shell for better dry-run visibility
             server.shell(
                 name="Execute CVE fixes via pro api",
-                commands=[f"pro api u.pro.security.fix.cve.execute.v1 --data '{payload}'"],
+                commands=[f"pro api u.pro.security.fix.cve.execute.v1 --data {shlex.quote(payload)}"],
                 _sudo=True,
                 _sudo_password=host.data.get('sudo_password'),
                 _env={"LC_ALL": "C"}
@@ -250,7 +259,7 @@ def _post_check(state, host):
     cve_list = host.data.get('cve_list', [])
     payload = json.dumps({"cves": cve_list})
     res = host.run_shell_command(
-        f"pro api u.pro.security.fix.cve.plan.v1 --data '{payload}'",
+        f"pro api u.pro.security.fix.cve.plan.v1 --data {shlex.quote(payload)}",
         _sudo=True,
         _sudo_password=host.data.get('sudo_password'),
         _env={"LC_ALL": "C"}
