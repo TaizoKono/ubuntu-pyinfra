@@ -7,6 +7,14 @@ from datetime import datetime
 from pyinfra.operations import python, server
 from pyinfra import logger
 
+# カーネル・Nvidia 系パッケージは update_kernel タスクが専任で担うため、
+# run_update 時に常に除外する（再起動なし適用を防ぐ）。
+_KERNEL_NVIDIA_PKGS = frozenset({'linux', 'linux-firmware'})
+_KERNEL_NVIDIA_PREFIXES = ('linux-', 'nvidia-')
+
+def _is_kernel_or_nvidia(pkg):
+    return pkg in _KERNEL_NVIDIA_PKGS or pkg.startswith(_KERNEL_NVIDIA_PREFIXES)
+
 def _get_cves(state, host):
     # Check if specific CVEs are requested via CLI parameter
     cves_raw = host.data.get('cves')
@@ -142,16 +150,7 @@ def _scan_and_plan(state, host):
         host.data.skip_cve_tasks = True
 
 
-def _finalize(state, host):
-    if host.data.get('skip_cve_tasks'):
-        return
-
-    cve_results = host.data.get('cve_results', [])
-    csv_date = datetime.now().strftime('%Y%m%d')
-    os.makedirs("output/check_cve", exist_ok=True)
-    summary_path = f"output/check_cve/summary_{host.name}_{csv_date}.csv"
-
-    # Helper to humanize the plan operations
+def _write_summary_csv(cve_results, path):
     def get_action_desc(plan):
         if not plan:
             return "No plan available"
@@ -168,12 +167,10 @@ def _finalize(state, host):
                 ops.append(op)
         return " -> ".join(ops)
 
-    # 1. Generate Summary CSV (sorted by CVE ID)
     sorted_results = sorted(cve_results, key=lambda c: c.get('title', ''))
-    with open(summary_path, "w", encoding='utf-8', newline='') as f:
+    with open(path, "w", encoding='utf-8', newline='') as f:
         writer = csv.writer(f)
         writer.writerow(["CVE ID", "Current Status", "Expected Status", "Packages", "Action Needed"])
-        
         for cve in sorted_results:
             writer.writerow([
                 cve.get('title'),
@@ -182,7 +179,19 @@ def _finalize(state, host):
                 ", ".join(cve.get('affected_packages') or []),
                 get_action_desc(cve.get('plan') or [])
             ])
-    
+
+
+def _finalize(state, host):
+    if host.data.get('skip_cve_tasks'):
+        return
+
+    cve_results = host.data.get('cve_results', [])
+    csv_date = datetime.now().strftime('%Y%m%d')
+    os.makedirs("output/check_cve", exist_ok=True)
+    summary_path = f"output/check_cve/summary_{host.name}_{csv_date}.csv"
+
+    # 1. Generate Summary CSV (pre-execution state)
+    _write_summary_csv(cve_results, summary_path)
     logger.info(f"Summary report generated at: {summary_path}")
 
     # 2. Prepare for Execution
@@ -195,20 +204,27 @@ def _finalize(state, host):
     def needs_pro(plan):
         return any(p.get('operation') in ['attach', 'enable'] for p in (plan or []))
     
+    patchable_cves = []
     if run_update:
         # Only execute for those still affected and having a plan
-        patchable_cves = []
         for cve in cve_results:
             if cve.get('current_status') == 'still-affected' and cve.get('plan'):
                 if exclude_pro and needs_pro(cve.get('plan', [])):
                     logger.info(f"Skipping {cve.get('title')} as it requires Ubuntu Pro and exclude_pro is set.")
+                    continue
+                affected = cve.get('affected_packages') or []
+                if any(_is_kernel_or_nvidia(p) for p in affected):
+                    logger.info(
+                        f"Skipping {cve.get('title')} (kernel/nvidia package: {affected})."
+                        " Use update_kernel task instead."
+                    )
                     continue
                 patchable_cves.append(cve.get('title'))
         
         if patchable_cves:
             logger.info(f"Found {len(patchable_cves)} patchable CVEs. Preparing execution...")
             payload = json.dumps({"cves": patchable_cves})
-            
+
             # Use server.shell for better dry-run visibility
             server.shell(
                 name="Execute CVE fixes via pro api",
@@ -219,6 +235,48 @@ def _finalize(state, host):
             )
         else:
             logger.info("No patchable CVEs found to execute.")
+
+    host.data.did_execute = run_update and bool(patchable_cves)
+
+def _post_check(state, host):
+    if host.data.get('skip_cve_tasks'):
+        return
+
+    run_update_raw = host.data.get('run_update', os.getenv('RUN_UPDATE', False))
+    run_update = str(run_update_raw).lower() in ['true', 'yes', '1', 'y']
+    if not run_update or not host.data.get('did_execute'):
+        return
+
+    cve_list = host.data.get('cve_list', [])
+    payload = json.dumps({"cves": cve_list})
+    res = host.run_shell_command(
+        f"pro api u.pro.security.fix.cve.plan.v1 --data '{payload}'",
+        _sudo=True,
+        _sudo_password=host.data.get('sudo_password'),
+        _env={"LC_ALL": "C"}
+    )
+    if not res[0] or not res[1].stdout:
+        logger.error(f"[{host.name}] Post-check re-scan failed.")
+        return
+
+    try:
+        data = json.loads(res[1].stdout)
+        post_results = data.get('data', {}).get('attributes', {}).get('cves_data', {}).get('cves', [])
+    except Exception as e:
+        logger.error(f"[{host.name}] Failed to parse post-check output: {e}")
+        return
+
+    csv_date = datetime.now().strftime('%Y%m%d')
+    summary_path = f"output/check_cve/summary_{host.name}_{csv_date}.csv"
+    _write_summary_csv(post_results, summary_path)
+    logger.info(f"[{host.name}] Post-check report updated at: {summary_path}")
+
+    fixed = [c.get('title') for c in post_results if c.get('current_status') == 'fixed']
+    still = [c.get('title') for c in post_results if c.get('current_status') == 'still-affected']
+    logger.info(f"[{host.name}] Post-check: {len(fixed)} fixed, {len(still)} still-affected")
+    for cve in still:
+        logger.warning(f"[{host.name}] Still affected after execute: {cve}")
+
 
 # Execution Flow
 python.call(
@@ -237,5 +295,11 @@ python.call(
 python.call(
     name="2.finalize (Report & Execute)",
     function=_finalize,
+    _sudo=True
+)
+
+python.call(
+    name="3.post_check (Re-scan after execute)",
+    function=_post_check,
     _sudo=True
 )

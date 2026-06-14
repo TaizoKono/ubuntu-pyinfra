@@ -56,10 +56,14 @@ uv run pyinfra inventories/inventory.py deploys/check_cve.py --data only_critica
 
 - **`summary_<host>_<date>.csv`**
   - **CVE ID**: 脆弱性番号（昇順ソート済）
-  - **Current Status**: 現在の状態（still-affected など）
+  - **Current Status**: 現在の状態（still-affected など）。`run_update=true` の場合はパッチ適用後の再スキャン結果で上書きされる
   - **Expected Status**: 修正後の期待ステータス
   - **Packages**: 影響を受けるパッケージ名
   - **Action Needed**: 修正に必要な具体的なアクション（ESM有効化、アップグレード手順など）
+
+## 注意事項
+
+- **カーネル・Nvidia 系パッケージ**: `run_update=true` を指定しても、`linux`, `linux-*`, `nvidia-*` に関連する CVE は適用されません。これらの更新は `update_kernel` タスクで行ってください。該当 CVE は summary CSV には記録されます。
 
 ## 前提条件
 
