@@ -43,6 +43,8 @@ uv run pyinfra inventories/inventory.py deploys/check_cve.py --data cves="CVE-20
 | `only_critical` | `true` | 重要度が "Critical" のものだけに絞り込む（デフォルトは High以上） |
 | `exclude_pro` | `true` | Ubuntu Pro登録やサービス有効化が必要な修正を除外する |
 | `run_update` | `true` | 調査だけでなく、実際にパッチの適用（execute）まで行う |
+| `chunk_size` | 整数（デフォルト: `20`） | `pro api` に一度に渡すCVEの件数。CVE件数が多くAPIエラーが頻発する場合は小さく（例: `10`）設定する |
+| `false_positive` | `true` | `current_status` と `expected_status` が共に `not-affected` または `fixed` で一致する行のみCSVに出力する（誤検知の確認用） |
 
 ### 使用例：重要度Criticalのみを調査してアップデートまで実行
 

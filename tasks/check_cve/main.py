@@ -15,6 +15,10 @@ _KERNEL_NVIDIA_PREFIXES = ('linux-', 'nvidia-')
 
 _CVE_RE = re.compile(r'^CVE-\d{4}-\d{4,7}$')
 
+def _chunked(lst, size):
+    for i in range(0, len(lst), size):
+        yield lst[i:i + size]
+
 def _is_kernel_or_nvidia(pkg):
     return pkg in _KERNEL_NVIDIA_PKGS or pkg.startswith(_KERNEL_NVIDIA_PREFIXES)
 
@@ -85,7 +89,7 @@ def _get_cves(state, host):
         if s1_token:
             url = f"https://apse1-globalsoc.sentinelone.net/web/api/v2.1/application-management/risks?endpointName__contains={target_hostname}&severities={s1_api_severity}&limit=1000"
             headers = {"Authorization": f"ApiToken {s1_token}"}
-            
+
             # Retry logic for API calls (especially for 429 Rate Limiting)
             max_retries = 3
             import time
@@ -135,28 +139,51 @@ def _scan_and_plan(state, host):
     if not cve_list:
         return
 
-    logger.info(f"Scanning and planning for {len(cve_list)} CVEs using pro api...")
-    payload = json.dumps({"cves": cve_list})
-    
-    # Use pro api to get a structured fix plan in JSON
-    res = host.run_shell_command(
-        f"pro api u.pro.security.fix.cve.plan.v1 --data {shlex.quote(payload)}",
-        _sudo=True,
-        _sudo_password=host.data.get('sudo_password'),
-        _env={"LC_ALL": "C"}
-    )
+    chunk_size_raw = host.data.get('chunk_size', 20)
+    try:
+        chunk_size = max(1, int(chunk_size_raw))
+    except (ValueError, TypeError):
+        chunk_size = 20
 
-    if res[0] and res[1].stdout:
-        try:
-            data = json.loads(res[1].stdout)
-            # Store the raw CVE results for the finalize step
-            host.data.cve_results = data.get('data', {}).get('attributes', {}).get('cves_data', {}).get('cves', [])
-        except Exception as e:
-            logger.error(f"Failed to parse pro api output: {e}")
-            host.data.skip_cve_tasks = True
-    else:
-        logger.error(f"pro api command failed or returned empty output: {res[1].stderr}")
+    chunks = list(_chunked(cve_list, chunk_size))
+    logger.info(f"Scanning {len(cve_list)} CVEs in {len(chunks)} chunks (size={chunk_size}) using pro api...")
+
+    all_cve_results = {}  # title -> cve_dict (重複排除用)
+    failed_chunks = 0
+
+    for i, chunk in enumerate(chunks, 1):
+        logger.info(f"  Chunk {i}/{len(chunks)}: {len(chunk)} CVEs")
+        payload = json.dumps({"cves": chunk})
+        res = host.run_shell_command(
+            f"pro api u.pro.security.fix.cve.plan.v1 --data {shlex.quote(payload)}",
+            _sudo=True,
+            _sudo_password=host.data.get('sudo_password'),
+            _env={"LC_ALL": "C"}
+        )
+        if res[0] and res[1].stdout:
+            try:
+                data = json.loads(res[1].stdout)
+                cves = data.get('data', {}).get('attributes', {}).get('cves_data', {}).get('cves', [])
+                for cve in cves:
+                    title = cve.get('title')
+                    if title:
+                        all_cve_results[title] = cve
+            except Exception as e:
+                logger.warning(f"Failed to parse pro api output for chunk {i}: {e}")
+                failed_chunks += 1
+        else:
+            logger.warning(f"pro api failed for chunk {i}: {res[1].stderr}")
+            failed_chunks += 1
+
+    if not all_cve_results and failed_chunks == len(chunks):
+        logger.error("All chunks failed. Stopping further processing.")
         host.data.skip_cve_tasks = True
+        return
+
+    if failed_chunks > 0:
+        logger.warning(f"{failed_chunks}/{len(chunks)} chunks failed. Partial results available.")
+
+    host.data.cve_results = list(all_cve_results.values())
 
 
 def _write_summary_csv(cve_results, path):
@@ -200,7 +227,19 @@ def _finalize(state, host):
     summary_path = f"output/check_cve/summary_{host.name}_{csv_date}.csv"
 
     # 1. Generate Summary CSV (pre-execution state)
-    _write_summary_csv(cve_results, summary_path)
+    false_positive_raw = host.data.get('false_positive', False)
+    false_positive = str(false_positive_raw).lower() in ['true', 'yes', '1', 'y']
+    if false_positive:
+        _FP_STATUSES = {'not-affected', 'fixed'}
+        cve_results_to_write = [
+            c for c in cve_results
+            if c.get('current_status') == c.get('expected_status')
+            and c.get('current_status') in _FP_STATUSES
+        ]
+        logger.info(f"false_positive filter: {len(cve_results_to_write)}/{len(cve_results)} CVEs match.")
+    else:
+        cve_results_to_write = cve_results
+    _write_summary_csv(cve_results_to_write, summary_path)
     logger.info(f"Summary report generated at: {summary_path}")
 
     # 2. Prepare for Execution
@@ -257,27 +296,66 @@ def _post_check(state, host):
         return
 
     cve_list = host.data.get('cve_list', [])
-    payload = json.dumps({"cves": cve_list})
-    res = host.run_shell_command(
-        f"pro api u.pro.security.fix.cve.plan.v1 --data {shlex.quote(payload)}",
-        _sudo=True,
-        _sudo_password=host.data.get('sudo_password'),
-        _env={"LC_ALL": "C"}
-    )
-    if not res[0] or not res[1].stdout:
-        logger.error(f"[{host.name}] Post-check re-scan failed.")
+
+    chunk_size_raw = host.data.get('chunk_size', 20)
+    try:
+        chunk_size = max(1, int(chunk_size_raw))
+    except (ValueError, TypeError):
+        chunk_size = 20
+
+    chunks = list(_chunked(cve_list, chunk_size))
+    logger.info(f"[{host.name}] Post-check re-scan: {len(cve_list)} CVEs in {len(chunks)} chunks...")
+
+    all_post_results = {}
+    failed_chunks = 0
+
+    for i, chunk in enumerate(chunks, 1):
+        payload = json.dumps({"cves": chunk})
+        res = host.run_shell_command(
+            f"pro api u.pro.security.fix.cve.plan.v1 --data {shlex.quote(payload)}",
+            _sudo=True,
+            _sudo_password=host.data.get('sudo_password'),
+            _env={"LC_ALL": "C"}
+        )
+        if res[0] and res[1].stdout:
+            try:
+                data = json.loads(res[1].stdout)
+                cves = data.get('data', {}).get('attributes', {}).get('cves_data', {}).get('cves', [])
+                for cve in cves:
+                    title = cve.get('title')
+                    if title:
+                        all_post_results[title] = cve
+            except Exception as e:
+                logger.warning(f"[{host.name}] Failed to parse post-check output for chunk {i}: {e}")
+                failed_chunks += 1
+        else:
+            logger.warning(f"[{host.name}] Post-check pro api failed for chunk {i}: {res[1].stderr}")
+            failed_chunks += 1
+
+    if not all_post_results and failed_chunks == len(chunks):
+        logger.error(f"[{host.name}] Post-check re-scan failed for all chunks.")
         return
 
-    try:
-        data = json.loads(res[1].stdout)
-        post_results = data.get('data', {}).get('attributes', {}).get('cves_data', {}).get('cves', [])
-    except Exception as e:
-        logger.error(f"[{host.name}] Failed to parse post-check output: {e}")
-        return
+    if failed_chunks > 0:
+        logger.warning(f"[{host.name}] Post-check: {failed_chunks}/{len(chunks)} chunks failed.")
+
+    post_results = list(all_post_results.values())
 
     csv_date = datetime.now().strftime('%Y%m%d')
     summary_path = f"output/check_cve/summary_{host.name}_{csv_date}.csv"
-    _write_summary_csv(post_results, summary_path)
+    false_positive_raw = host.data.get('false_positive', False)
+    false_positive = str(false_positive_raw).lower() in ['true', 'yes', '1', 'y']
+    if false_positive:
+        _FP_STATUSES = {'not-affected', 'fixed'}
+        post_results_to_write = [
+            c for c in post_results
+            if c.get('current_status') == c.get('expected_status')
+            and c.get('current_status') in _FP_STATUSES
+        ]
+        logger.info(f"[{host.name}] false_positive filter: {len(post_results_to_write)}/{len(post_results)} CVEs match.")
+    else:
+        post_results_to_write = post_results
+    _write_summary_csv(post_results_to_write, summary_path)
     logger.info(f"[{host.name}] Post-check report updated at: {summary_path}")
 
     fixed = [c.get('title') for c in post_results if c.get('current_status') == 'fixed']
