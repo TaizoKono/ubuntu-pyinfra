@@ -6,7 +6,7 @@ GPU サーバに対しては Nvidia ドライバの更新も同時に行いま�
 ## 実行コマンド
 
 ```bash
-uv run pyinfra inventories/inventory.py deploys/update_kernel.py [--dry-run]
+uv run pyinfra inventories/inventory.py deploys/update_kernel.py [--dry]
 ```
 
 ## GPU サーバの設定
@@ -62,10 +62,10 @@ GPU/非GPU の区別は `inventory.py` の `is_gpu` フラグで制御します�
 
 ## 使用例
 
-### 事前確認（--dry-run で確認）
+### 事前確認（--dry で確認）
 
 ```bash
-uv run pyinfra inventories/inventory.py deploys/update_kernel.py --dry-run
+uv run pyinfra inventories/inventory.py deploys/update_kernel.py --dry
 ```
 
 出力例：
