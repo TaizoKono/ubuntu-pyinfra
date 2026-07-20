@@ -3,7 +3,6 @@ import json
 import re
 import csv
 import shlex
-import requests
 from datetime import datetime
 from pyinfra.operations import python, server
 from pyinfra import logger
@@ -43,91 +42,32 @@ def _get_cves(state, host):
             host.data.skip_cve_tasks = False
             return
 
-    # Determine source (S1 or local scan)
-    no_s1_raw = host.data.get('no_s1', os.getenv('NO_S1', False))
-    no_s1 = str(no_s1_raw).lower() in ['true', 'yes', '1', 'y']
-    
-    s1_cve_list = []
     only_critical_raw = host.data.get('only_critical', False)
     only_critical = str(only_critical_raw).lower() in ['true', 'yes', '1', 'y']
 
-    if no_s1:
-        logger.info("Mode: Local scan (--no-s1). Fetching CVEs from pro cves.")
-        # Local scan requires sudo and English locale
-        host.run_shell_command("apt-get update && apt-get install -y ubuntu-pro-client", _sudo=True, _sudo_password=host.data.get('sudo_password'), _env={"LC_ALL": "C"})
-        res = host.run_shell_command("pro cves", _sudo=True, _sudo_password=host.data.get('sudo_password'), _env={"LC_ALL": "C"})
-        
-        if res[1].stdout:
-            clean_stdout = re.sub(r'\x1b\[[0-9;]*m', '', res[1].stdout)
-            if only_critical:
-                regex = r'(CVE-\d{4}-\d+)\s+\S+\s+critical'
-                logger.info("Severity filter: CRITICAL only")
-            else:
-                regex = r'(CVE-\d{4}-\d+)\s+\S+\s+(?:high|critical)'
-                logger.info("Severity filter: HIGH or above (default)")
-            
-            matches = re.findall(regex, clean_stdout, re.IGNORECASE)
-            s1_cve_list = list(set(matches))
-    else:
-        logger.info("Mode: SentinelOne API. Fetching CVEs from S1.")
-        hostname_res = host.run_shell_command("hostname", _env={"LC_ALL": "C"})
-        target_hostname = hostname_res[1].stdout.strip()
-        
-        token_path = "files/check_cve/token"
-        s1_token = ""
-        if os.path.exists(token_path):
-            with open(token_path, "r") as f:
-                s1_token = f.read().strip()
-                
+    logger.info("Fetching CVEs from pro cves.")
+    host.run_shell_command("apt-get update && apt-get install -y ubuntu-pro-client", _sudo=True, _sudo_password=host.data.get('sudo_password'), _env={"LC_ALL": "C"})
+    res = host.run_shell_command("pro cves", _sudo=True, _sudo_password=host.data.get('sudo_password'), _env={"LC_ALL": "C"})
+
+    cve_list = []
+    if res[1].stdout:
+        clean_stdout = re.sub(r'\x1b\[[0-9;]*m', '', res[1].stdout)
         if only_critical:
-            s1_api_severity = "CRITICAL"
+            regex = r'(CVE-\d{4}-\d+)\s+\S+\s+critical'
             logger.info("Severity filter: CRITICAL only")
         else:
-            s1_api_severity = "CRITICAL,HIGH"
+            regex = r'(CVE-\d{4}-\d+)\s+\S+\s+(?:high|critical)'
             logger.info("Severity filter: HIGH or above (default)")
 
-        if s1_token:
-            url = f"https://apse1-globalsoc.sentinelone.net/web/api/v2.1/application-management/risks?endpointName__contains={target_hostname}&severities={s1_api_severity}&limit=1000"
-            headers = {"Authorization": f"ApiToken {s1_token}"}
+        matches = re.findall(regex, clean_stdout, re.IGNORECASE)
+        cve_list = list(set(matches))
 
-            # Retry logic for API calls (especially for 429 Rate Limiting)
-            max_retries = 3
-            import time
-            import random
-
-            for attempt in range(max_retries):
-                try:
-                    resp = requests.get(url, headers=headers)
-                    if resp.status_code == 200:
-                        data = resp.json().get("data", [])
-                        for item in data:
-                            cve_id = item.get("cveId")
-                            if cve_id and cve_id not in s1_cve_list:
-                                s1_cve_list.append(cve_id)
-                        break # Success
-                    elif resp.status_code == 429:
-                        # Rate limited: wait and retry
-                        wait_time = (2 ** attempt) + random.random()
-                        logger.warning(f"S1 API Rate limited (429) for {host.name}. Retrying in {wait_time:.2f}s... (Attempt {attempt+1}/{max_retries})")
-                        time.sleep(wait_time)
-                    elif resp.status_code == 401:
-                        logger.error(f"S1 API Unauthorized (401) for {host.name}. Please check your token.")
-                        break # Auth error won't be fixed by retry
-                    else:
-                        logger.warning(f"S1 API returned status {resp.status_code} for {host.name}")
-                        break
-                except Exception as e:
-                    logger.warning(f"Failed to fetch from S1 for {host.name}: {e}")
-                    time.sleep(1)
-        else:
-            logger.warning("No S1 token found at files/check_cve/token")
-
-    if not s1_cve_list:
+    if not cve_list:
         logger.info("No CVEs found. Stopping further processing for this host.")
         host.data.skip_cve_tasks = True
         return
 
-    host.data.cve_list = sorted(s1_cve_list)
+    host.data.cve_list = sorted(cve_list)
     host.data.skip_cve_tasks = False
 
 
@@ -370,7 +310,7 @@ python.call(
     name="0.get (Fetch CVEs)",
     function=_get_cves,
     _sudo=True,
-    _parallel=1  # S1 APIのレート制限回避のため、1台ずつ順番に実行
+    _parallel=1  # pro cves 実行時の負荷を抑えるため、1台ずつ順番に実行
 )
 
 python.call(

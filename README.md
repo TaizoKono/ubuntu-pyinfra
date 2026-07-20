@@ -38,12 +38,6 @@ Pyinfraを使用してUbuntuサーバ群を管理するツールです。
    cp inventories/inventory.py.template inventories/inventory.py
    ```
 
-5. **(任意) S1 Tokenファイルの作成**: `check_cve` のSentinelOne APIモードを利用する場合のみ、`files/check_cve/token.template` をコピーして `files/check_cve/token` を作成し、有効なApiTokenを配置してください。こちらも `.gitignore` で除外されます。
-
-   ```bash
-   cp files/check_cve/token.template files/check_cve/token
-   ```
-
 ## 基本的な使い方
 
 ```bash
