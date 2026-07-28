@@ -7,6 +7,7 @@ Pyinfraを使用してUbuntuサーバ群を管理するツールです。
 | タスク | 説明 | ドキュメント |
 | :--- | :--- | :--- |
 | `check_cve` | CVE脆弱性の検出・レポート・パッチ適用 | [docs/check_cve.md](docs/check_cve.md) |
+| `check_ntp` | 各サーバの時刻同期（NTP）状態を確認 | [docs/check_ntp.md](docs/check_ntp.md) |
 | `install_deb` | debパッケージの転送・インストール | [docs/install_deb.md](docs/install_deb.md) |
 | `install_apt` | aptリポジトリからパッケージをインストール | [docs/install_apt.md](docs/install_apt.md) |
 | `update_kernel` | Ubuntuカーネルを更新して再起動 | [docs/update_kernel.md](docs/update_kernel.md) |
