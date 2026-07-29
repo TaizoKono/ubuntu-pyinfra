@@ -1,7 +1,7 @@
 from pyinfra.operations import python, server
 from pyinfra import host, logger
 
-# Runs during "Preparing operation files" phase — before confirmation prompt and in --dry-run.
+# Runs during "Preparing operation files" phase — before confirmation prompt and in --dry.
 _pkg_param = host.data.get('pkg', '')
 if _pkg_param:
     logger.info(f"[{host.name}] apt packages to install: {_pkg_param}")

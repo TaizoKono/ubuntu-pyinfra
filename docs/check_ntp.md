@@ -5,7 +5,7 @@
 ## 実行コマンド
 
 ```bash
-uv run pyinfra inventories/inventory.py deploys/check_ntp.py [--dry-run]
+uv run pyinfra inventories/inventory.py deploys/check_ntp.py [--dry]
 ```
 
 ## 確認内容

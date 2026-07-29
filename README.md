@@ -6,7 +6,6 @@ Pyinfraを使用してUbuntuサーバ群を管理するツールです。
 
 | タスク | 説明 | ドキュメント |
 | :--- | :--- | :--- |
-| `check_cve` | CVE脆弱性の検出・レポート・パッチ適用 | [docs/check_cve.md](docs/check_cve.md) |
 | `check_ntp` | 各サーバの時刻同期（NTP）状態を確認 | [docs/check_ntp.md](docs/check_ntp.md) |
 | `install_deb` | debパッケージの転送・インストール | [docs/install_deb.md](docs/install_deb.md) |
 | `install_apt` | aptリポジトリからパッケージをインストール | [docs/install_apt.md](docs/install_apt.md) |
@@ -42,9 +41,5 @@ Pyinfraを使用してUbuntuサーバ群を管理するツールです。
 ## 基本的な使い方
 
 ```bash
-uv run pyinfra inventories/inventory.py deploys/<タスク名>.py [--data オプション] [--dry-run]
+uv run pyinfra inventories/inventory.py deploys/<タスク名>.py [--data オプション] [--dry]
 ```
-
-## 前提条件
-
-- **Ubuntu Pro**: CVEスキャンやパッチ適用には、対象サーバーがUbuntu Proに紐付いている必要があります。

@@ -2,7 +2,7 @@ import os
 from pyinfra.operations import python, server, files
 from pyinfra import host, logger
 
-# Runs during "Preparing operation files" phase — before confirmation prompt and in --dry-run.
+# Runs during "Preparing operation files" phase — before confirmation prompt and in --dry.
 # Local filesystem scan only (no SSH), so it works regardless of execution mode.
 _deb_param = host.data.get('deb', '')
 if _deb_param:

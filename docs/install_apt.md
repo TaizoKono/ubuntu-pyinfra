@@ -6,7 +6,7 @@ aptリポジトリからパッケージ名を指定してインストールす�
 ## 実行コマンド
 
 ```bash
-uv run pyinfra inventories/inventory.py deploys/install_apt.py --data pkg=<パッケージ名> [--dry-run]
+uv run pyinfra inventories/inventory.py deploys/install_apt.py --data pkg=<パッケージ名> [--dry]
 ```
 
 ## オプション (--data)
@@ -27,7 +27,7 @@ uv run pyinfra inventories/inventory.py deploys/install_apt.py --data pkg=curl
 uv run pyinfra inventories/inventory.py deploys/install_apt.py --data pkg="curl,wget,jq"
 
 # 事前確認（インストールは行わずパッケージ名のみ表示）
-uv run pyinfra inventories/inventory.py deploys/install_apt.py --data pkg=curl --dry-run
+uv run pyinfra inventories/inventory.py deploys/install_apt.py --data pkg=curl --dry
 ```
 
 ## 冪等性

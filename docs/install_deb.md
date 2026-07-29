@@ -6,7 +6,7 @@
 ## 実行コマンド
 
 ```bash
-uv run pyinfra inventories/inventory.py deploys/install_deb.py --data deb=<パッケージ名> [--dry-run]
+uv run pyinfra inventories/inventory.py deploys/install_deb.py --data deb=<パッケージ名> [--dry]
 ```
 
 ## debファイルの配置
@@ -42,12 +42,12 @@ files/downloads/
 | `deb=veracrypt-console` | `veracrypt-console-1.26.24-Ubuntu-22.04-amd64.deb` |
 | `deb=SentinelAgent` | `SentinelAgent_linux_x86_64_v25_2_2_14.deb` |
 
-## 事前確認（--dry-run）
+## 事前確認（--dry）
 
-`--dry-run` を付けると、SSHで接続した上でdebファイルの候補一覧を表示し、転送・インストールは行いません。
+`--dry` を付けると、SSHで接続した上でdebファイルの候補一覧を表示し、転送・インストールは行いません。
 
 ```bash
-uv run pyinfra inventories/inventory.py deploys/install_deb.py --data deb=veracrypt-console --dry-run
+uv run pyinfra inventories/inventory.py deploys/install_deb.py --data deb=veracrypt-console --dry
 ```
 
 出力例：
