@@ -64,4 +64,10 @@ uv run pyinfra inventories/inventory.py deploys/check_cve.py --data only_critica
 
 ## 実行制御
 
-- **順次実行**: `0.get (Fetch CVEs)` フェーズは、対象サーバーへの負荷集中を避けるため、ホスト1台ずつ順番に実行されます。後続の `1.scan_and_plan` や `2.finalize` は並列で高速に実行されます。
+- **順次実行**: `1.get (Fetch CVEs)` フェーズは、対象サーバーへの負荷集中を避けるため、ホスト1台ずつ順番に実行されます。後続の `2.scan_and_plan` や `3.finalize` は並列で高速に実行されます。
+
+## 残存ファイルのクリーンアップ
+
+pyinfraはsudo実行のたびに、パスワードを渡すための一時的なaskpassスクリプトを対象サーバの `/tmp` に作成し、通常は実行完了時に自動で削除します。ただし、SSH切断やタイムアウト等で実行が異常終了した場合、このファイルが削除されずに残ることがあります。
+
+残存したaskpassファイルは後続の実行で `sudo: ... Exec format error` のようなエラーを引き起こすことがあるため、`0.cleanup_askpass` フェーズで実行のたびに `/tmp/pyinfra-sudo-askpass-*` を確認し、残っていれば削除しています（sudo権限は不要）。

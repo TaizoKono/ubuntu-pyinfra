@@ -21,6 +21,28 @@ def _chunked(lst, size):
 def _is_kernel_or_nvidia(pkg):
     return pkg in _KERNEL_NVIDIA_PKGS or pkg.startswith(_KERNEL_NVIDIA_PREFIXES)
 
+def _cleanup_stale_askpass(state, host):
+    # 過去の実行がタイムアウトやSSH切断等で異常終了すると、pyinfraが
+    # sudo用に生成する一時askpassスクリプトが /tmp に残存することがある。
+    # 残存ファイルが後続実行のsudo呼び出しと衝突し
+    # 「Exec format error」を引き起こすことがあるため、実行の最初に掃除する。
+    ok, res = host.run_shell_command(
+        "find /tmp -maxdepth 1 -name 'pyinfra-sudo-askpass-*' -type f",
+        _env={"LC_ALL": "C"},
+    )
+    stale_files = [line for line in (res.stdout or "").splitlines() if line.strip()]
+    if not stale_files:
+        return
+
+    logger.warning(
+        f"[{host.name}] Removing {len(stale_files)} stale sudo askpass file(s) left over from a previous run: {stale_files}"
+    )
+    host.run_shell_command(
+        "find /tmp -maxdepth 1 -name 'pyinfra-sudo-askpass-*' -type f -delete",
+        _env={"LC_ALL": "C"},
+    )
+
+
 def _get_cves(state, host):
     # Check if specific CVEs are requested via CLI parameter
     cves_raw = host.data.get('cves')
@@ -307,26 +329,31 @@ def _post_check(state, host):
 
 # Execution Flow
 python.call(
-    name="0.get (Fetch CVEs)",
+    name="0.cleanup_askpass (Remove stale sudo askpass files)",
+    function=_cleanup_stale_askpass,
+)
+
+python.call(
+    name="1.get (Fetch CVEs)",
     function=_get_cves,
     _sudo=True,
     _parallel=1  # pro cves 実行時の負荷を抑えるため、1台ずつ順番に実行
 )
 
 python.call(
-    name="1.scan_and_plan (Pro API Plan)",
+    name="2.scan_and_plan (Pro API Plan)",
     function=_scan_and_plan,
     _sudo=True
 )
 
 python.call(
-    name="2.finalize (Report & Execute)",
+    name="3.finalize (Report & Execute)",
     function=_finalize,
     _sudo=True
 )
 
 python.call(
-    name="3.post_check (Re-scan after execute)",
+    name="4.post_check (Re-scan after execute)",
     function=_post_check,
     _sudo=True
 )

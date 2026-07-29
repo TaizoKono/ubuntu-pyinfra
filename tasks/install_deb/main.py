@@ -39,6 +39,28 @@ def _find_deb_file(deb_param: str, ubuntu_version: str) -> str | None:
     return None
 
 
+def _cleanup_stale_askpass(state, host):
+    # 過去の実行がタイムアウトやSSH切断等で異常終了すると、pyinfraが
+    # sudo用に生成する一時askpassスクリプトが /tmp に残存することがある。
+    # 残存ファイルが後続実行のsudo呼び出しと衝突し
+    # 「Exec format error」を引き起こすことがあるため、実行の最初に掃除する。
+    ok, res = host.run_shell_command(
+        "find /tmp -maxdepth 1 -name 'pyinfra-sudo-askpass-*' -type f",
+        _env={"LC_ALL": "C"},
+    )
+    stale_files = [line for line in (res.stdout or "").splitlines() if line.strip()]
+    if not stale_files:
+        return
+
+    logger.warning(
+        f"[{host.name}] Removing {len(stale_files)} stale sudo askpass file(s) left over from a previous run: {stale_files}"
+    )
+    host.run_shell_command(
+        "find /tmp -maxdepth 1 -name 'pyinfra-sudo-askpass-*' -type f -delete",
+        _env={"LC_ALL": "C"},
+    )
+
+
 def _detect_and_resolve(state, host):
     deb_param = host.data.get('deb')
     if not deb_param:
@@ -126,18 +148,23 @@ def _install(state, host):
 
 
 python.call(
-    name="0.detect (Detect Ubuntu version and resolve deb)",
+    name="0.cleanup_askpass (Remove stale sudo askpass files)",
+    function=_cleanup_stale_askpass,
+)
+
+python.call(
+    name="1.detect (Detect Ubuntu version and resolve deb)",
     function=_detect_and_resolve,
 )
 
 python.call(
-    name="1.upload (Upload deb to remote)",
+    name="2.upload (Upload deb to remote)",
     function=_upload,
     _sudo=True,
 )
 
 python.call(
-    name="2.install (Install deb package)",
+    name="3.install (Install deb package)",
     function=_install,
     _sudo=True,
 )

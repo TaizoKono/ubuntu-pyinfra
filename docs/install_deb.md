@@ -68,15 +68,16 @@ uv run pyinfra inventories/inventory.py deploys/install_deb.py --data deb=veracr
 
 | ステージ | 内容 |
 | :--- | :--- |
-| `0.detect` | `lsb_release` でUbuntuバージョンを検出し、使用するdebファイルを決定する |
-| `1.upload` | debファイルをリモートの `remote_tmp`（デフォルト `/tmp`）に転送する |
-| `2.install` | `dpkg` でインストールする。既にインストール済みの場合はスキップ |
+| `0.cleanup_askpass` | `/tmp` に残存する過去のsudo askpassファイルを確認・削除する |
+| `1.detect` | `lsb_release` でUbuntuバージョンを検出し、使用するdebファイルを決定する |
+| `2.upload` | debファイルをリモートの `remote_tmp`（デフォルト `/tmp`）に転送する |
+| `3.install` | `dpkg` でインストールする。既にインストール済みの場合はスキップ |
 
 全ステージ並列実行（ホスト間の依存なし）。
 
 ## 冪等性
 
-- **1.upload**: ファイルチェックサムを比較し、同一ファイルが既に存在する場合は `No changes`
-- **2.install**: `dpkg-query` で同バージョンが既にインストール済みの場合はスキップし "already installed." をログ出力
+- **2.upload**: ファイルチェックサムを比較し、同一ファイルが既に存在する場合は `No changes`
+- **3.install**: `dpkg-query` で同バージョンが既にインストール済みの場合はスキップし "already installed." をログ出力
 
 再実行しても安全です。

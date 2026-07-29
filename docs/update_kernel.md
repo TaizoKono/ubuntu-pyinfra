@@ -91,11 +91,12 @@ uv run pyinfra inventories/inventory.py deploys/update_kernel.py --data nvidia_d
 
 | ステージ | 内容 |
 | :--- | :--- |
-| `0.pre_check` | 現在のカーネル・インストール済みカーネル一覧を取得。GPU サーバは Nvidia ドライバ情報も取得 |
-| `1.install` | メタパッケージで最新カーネルをインストール。`/var/run/reboot-required` および最新インストール済みカーネルと実行中カーネルの差分で再起動要否を判定 |
-| `2.nvidia_install` | GPU サーバのみ: `ubuntu-drivers autoinstall` で Nvidia ドライバを更新 |
-| `3.reboot` | カーネルまたはドライバの更新があった場合のみ再起動 |
-| `4.post_check` | 起動中カーネルを確認。GPU サーバは `nvidia-smi` でドライバを確認。エラーログをチェック。結果を CSV に記録 |
+| `0.cleanup_askpass` | `/tmp` に残存する過去のsudo askpassファイルを確認・削除する |
+| `1.pre_check` | 現在のカーネル・インストール済みカーネル一覧を取得。GPU サーバは Nvidia ドライバ情報も取得 |
+| `2.install` | メタパッケージで最新カーネルをインストール。`/var/run/reboot-required` および最新インストール済みカーネルと実行中カーネルの差分で再起動要否を判定 |
+| `3.nvidia_install` | GPU サーバのみ: `ubuntu-drivers autoinstall` で Nvidia ドライバを更新 |
+| `4.reboot` | カーネルまたはドライバの更新があった場合のみ再起動 |
+| `5.post_check` | 起動中カーネルを確認。GPU サーバは `nvidia-smi` でドライバを確認。エラーログをチェック。結果を CSV に記録 |
 
 ## 出力成果物
 

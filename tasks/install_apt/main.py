@@ -9,6 +9,28 @@ else:
     logger.warning(f"[{host.name}] Required parameter 'pkg' not provided. Use --data pkg=<name>")
 
 
+def _cleanup_stale_askpass(state, host):
+    # 過去の実行がタイムアウトやSSH切断等で異常終了すると、pyinfraが
+    # sudo用に生成する一時askpassスクリプトが /tmp に残存することがある。
+    # 残存ファイルが後続実行のsudo呼び出しと衝突し
+    # 「Exec format error」を引き起こすことがあるため、実行の最初に掃除する。
+    ok, res = host.run_shell_command(
+        "find /tmp -maxdepth 1 -name 'pyinfra-sudo-askpass-*' -type f",
+        _env={"LC_ALL": "C"},
+    )
+    stale_files = [line for line in (res.stdout or "").splitlines() if line.strip()]
+    if not stale_files:
+        return
+
+    logger.warning(
+        f"[{host.name}] Removing {len(stale_files)} stale sudo askpass file(s) left over from a previous run: {stale_files}"
+    )
+    host.run_shell_command(
+        "find /tmp -maxdepth 1 -name 'pyinfra-sudo-askpass-*' -type f -delete",
+        _env={"LC_ALL": "C"},
+    )
+
+
 def _install(state, host):
     pkg_raw = host.data.get('pkg')
     if not pkg_raw:
@@ -44,7 +66,12 @@ def _install(state, host):
 
 
 python.call(
-    name="0.install (apt install packages)",
+    name="0.cleanup_askpass (Remove stale sudo askpass files)",
+    function=_cleanup_stale_askpass,
+)
+
+python.call(
+    name="1.install (apt install packages)",
     function=_install,
     _sudo=True,
 )
