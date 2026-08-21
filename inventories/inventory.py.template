@@ -7,15 +7,21 @@ try:
 except EOFError:
     collected_password = None
 
-target = [
-    # 各ホストに共通のパスワードを割り当て
-    # is_gpu: True の場合、update_kernel タスクで Nvidia ドライバも更新します
-    ("ubuntu1", {"sudo_password": collected_password, "is_gpu": False}),
-    ("ubuntu2", {"sudo_password": collected_password, "is_gpu": False}),
-    ("ubuntu3", {"sudo_password": collected_password, "is_gpu": False}),
-    ("ubuntu4", {"sudo_password": collected_password, "is_gpu": False}),
-    ("ubuntu5", {"sudo_password": collected_password, "is_gpu": True}),
-    ("ubuntu6", {"sudo_password": collected_password, "is_gpu": True}),
-    ("ubuntu7", {"sudo_password": collected_password, "is_gpu": True}),
-    ("ubuntu8", {"sudo_password": collected_password, "is_gpu": True}),
-]
+# 全ホスト共通のSSH接続ユーザー名
+common_ssh_user = "ubuntu"
+
+target = (
+    [
+        # is_gpu: True の場合、update_kernel タスクで Nvidia ドライバも更新します
+        ("ubuntu1", {"is_gpu": False}),
+        ("ubuntu2", {"is_gpu": False}),
+        ("ubuntu3", {"is_gpu": False}),
+        ("ubuntu4", {"is_gpu": False}),
+        ("ubuntu5", {"is_gpu": True}),
+        ("ubuntu6", {"is_gpu": True}),
+        ("ubuntu7", {"is_gpu": True}),
+        ("ubuntu8", {"is_gpu": True}),
+    ],
+    # 全ホストに共通のsudoパスワードを割り当て（実行時に入力したパスワードを使用）
+    {"ssh_user": common_ssh_user, "sudo_password": collected_password},
+)
